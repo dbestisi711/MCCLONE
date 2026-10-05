@@ -233,6 +233,32 @@ fn water_slows_falling_and_swimming_rises() {
 }
 
 #[test]
+fn swims_out_of_a_pool_onto_the_bank() {
+    // Ground top at y=63; a 3-deep pool x in -4..=4 whose surface is level
+    // with the ground.
+    let mut w = flat_world(1, 63, blocks::GRASS_BLOCK);
+    fill(
+        &mut w,
+        IVec3::new(-4, 61, -4),
+        IVec3::new(4, 63, 4),
+        blocks::WATER,
+    );
+    let mut p = survival_player(Vec3::new(0.5, 61.0, 0.5));
+    p.yaw = YAW_EAST;
+    let swim = input(&[Key::Forward, Key::Jump]);
+    for _ in 0..200 {
+        p.tick(&swim, &w);
+        if p.position.x > 5.0 {
+            break;
+        }
+    }
+    assert!(p.position.x > 5.0, "left the pool: {:?}", p.position);
+    run(&mut p, &w, &InputState::default(), 20);
+    assert!(p.on_ground && (p.position.y - 64.0).abs() < 1e-3);
+    assert!(!p.in_water);
+}
+
+#[test]
 fn fall_damage_amounts() {
     for (height, expected) in [
         (3.0, 0.0),

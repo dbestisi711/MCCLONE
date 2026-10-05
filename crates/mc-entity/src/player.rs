@@ -139,6 +139,8 @@ pub struct Player {
     pub view_bobbing: bool,
     pub in_lava: bool,
     pub eyes_in_lava: bool,
+    /// Fraction (0..1) of the player's height below a fluid surface.
+    pub submerged: f32,
     pub exhaustion: f32,
     pub fall_distance: f32,
     /// Counts down from 10 after being hurt (camera shake / red flash).
@@ -202,6 +204,7 @@ impl Player {
             view_bobbing: true,
             in_lava: false,
             eyes_in_lava: false,
+            submerged: 0.0,
             exhaustion: 0.0,
             fall_distance: 0.0,
             hurt_time: 0,
@@ -274,6 +277,7 @@ impl Player {
         self.in_water = b.in_water;
         self.in_lava = b.in_lava;
         self.fall_distance = b.fall_distance;
+        self.submerged = b.submerged;
     }
 
     /// Horizontal movement input in the player's frame: x = strafe right,
@@ -498,7 +502,11 @@ impl Player {
             physics::FLUID_ACCEL
         };
         self.velocity += wish * accel;
-        if input.held(Key::Jump) {
+        let shallow = self.on_ground && self.submerged * self.height() < 0.4;
+        if input.held(Key::Jump) && shallow {
+            // Wading: a normal jump.
+            self.velocity.y = physics::JUMP_VELOCITY;
+        } else if input.held(Key::Jump) {
             self.velocity.y += 0.04;
         } else if input.held(Key::Sneak) {
             self.velocity.y -= 0.04;
