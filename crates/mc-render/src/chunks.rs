@@ -109,6 +109,9 @@ pub struct ChunkStats {
     pub frustum_culled: u32,
     pub sections_with_mesh: u32,
     pub quads_total: u64,
+    /// The visibility pass reached open sky (top of the world or the edge
+    /// of the render distance); when false the sky and clouds are skipped.
+    pub sky_visible: bool,
 }
 
 pub struct CullSettings {
@@ -526,6 +529,7 @@ impl ChunkMeshes {
         };
         let mut stats_visited = 0u32;
         let mut frustum_culled = 0u32;
+        let mut sky_visible = !cull.occlusion;
         let push = |st: &SectionState, cx: i32, sy: i32, cz: i32, out: &mut Vec<DrawItem>| {
             if st.gpu.iter().all(|g| g.is_none()) {
                 return;
@@ -568,6 +572,11 @@ impl ChunkMeshes {
             if self.chunks.contains_key(&cc) {
                 self.visit_stamp[vidx(cc.x, cam_sy, cc.z)] = stamp;
                 queue.push_back((cc.x, cam_sy, cc.z, 6, 0));
+            } else {
+                sky_visible = true;
+            }
+            if cam.y >= (WORLD_MIN_Y + SECTION_COUNT as i32 * 16) as f32 {
+                sky_visible = true;
             }
             while let Some((cx, sy, cz, from, dirs)) = queue.pop_front() {
                 let Some(st) = self.chunks.get(&ChunkPos::new(cx, cz)) else {
@@ -576,6 +585,12 @@ impl ChunkMeshes {
                 let s = &st.sections[sy as usize];
                 stats_visited += 1;
                 push(s, cx, sy, cz, out);
+                if sy == SECTION_COUNT as i32 - 1
+                    || (cx - cc.x).abs() >= rd
+                    || (cz - cc.z).abs() >= rd
+                {
+                    sky_visible = true;
+                }
                 let conn = if s.known { s.conn } else { ALL_CONNECTED };
                 for (f, &(dx, dy, dz)) in DIRS.iter().enumerate() {
                     if dirs & (1 << (f ^ 1)) != 0 {
@@ -585,7 +600,12 @@ impl ChunkMeshes {
                         continue;
                     }
                     let (nx, ny, nz) = (cx + dx, sy + dy, cz + dz);
-                    if ny < 0 || ny >= SECTION_COUNT as i32 || !in_range(nx, nz) {
+                    if ny < 0 || ny >= SECTION_COUNT as i32 {
+                        continue;
+                    }
+                    if !in_range(nx, nz) {
+                        // Looking out past the loaded area: the sky shows.
+                        sky_visible = true;
                         continue;
                     }
                     let vi = vidx(nx, ny, nz);
@@ -613,6 +633,7 @@ impl ChunkMeshes {
             .count() as u32;
         self.stats.sections_with_mesh = with_mesh;
         self.stats.visible = out.len() as u32;
+        self.stats.sky_visible = sky_visible;
         self.stats.visited = stats_visited;
         self.stats.frustum_culled = frustum_culled;
         self.stats.quads_total = self

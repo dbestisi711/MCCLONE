@@ -278,6 +278,8 @@ pub struct Renderer {
     last_tick: u64,
     last_tick_time: f64,
     mesh_rate: (f64, u64, f32),
+    /// Background where nothing is drawn (horizon or fog colour).
+    clear_color: wgpu::Color,
 }
 
 fn request_device(adapter: &wgpu::Adapter, layers: u32) -> (wgpu::Device, wgpu::Queue, u32) {
@@ -405,8 +407,9 @@ impl Renderer {
 
         let block_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blocks"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            // Repeat: greedy-merged quads tile their texture.
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
@@ -552,6 +555,7 @@ impl Renderer {
             last_tick: u64::MAX,
             last_tick_time: 0.0,
             mesh_rate: (0.0, 0, 0.0),
+            clear_color: wgpu::Color::BLACK,
         }
     }
 
@@ -733,6 +737,17 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
+        let bg = if fog[2] > 0.5 {
+            Vec3::new(fog_color[0], fog_color[1], fog_color[2])
+        } else {
+            sp.horizon
+        };
+        self.clear_color = wgpu::Color {
+            r: bg.x as f64,
+            g: bg.y as f64,
+            b: bg.z as f64,
+            a: 1.0,
+        };
 
         // Per-frame geometry.
         self.build_dynamic(world, frame, &sp);
@@ -1035,7 +1050,7 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(self.clear_color),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -1053,28 +1068,10 @@ impl Renderer {
         });
         pass.set_bind_group(0, &self.group0, &[]);
 
-        // Sky.
-        pass.set_pipeline(&self.pipes.sky);
-        pass.draw(0..3, 0..1);
-        draws += 1;
-
         let sky_n = self.sky_list.verts.len() as u32;
         let world_n = self.world_list.verts.len() as u32;
         let dyn_bases = [0, sky_n, sky_n + world_n];
-        if !self.sky_list.batches.is_empty() {
-            pass.set_vertex_buffer(0, self.dyn_buf.buf.slice(..));
-            pass.set_pipeline(&self.pipes.sprite);
-            for b in &self.sky_list.batches {
-                if let DynKind::Sprite(t) = &b.kind {
-                    pass.set_bind_group(1, &t.bind_group, &[]);
-                    pass.draw(
-                        dyn_bases[0] + b.start..dyn_bases[0] + b.start + b.count,
-                        0..1,
-                    );
-                    draws += 1;
-                }
-            }
-        }
+        let sky_visible = self.chunks.stats.sky_visible;
 
         // Chunks: opaque and cutout front to back.
         pass.set_index_buffer(self.quad_index.slice(..), wgpu::IndexFormat::Uint32);
@@ -1117,8 +1114,31 @@ impl Renderer {
             }
         }
 
+        // Sky, sun and moon after the opaque world: they sit at depth 0, so
+        // early depth testing skips every pixel the terrain already covers.
+        // Skipped entirely when the visibility pass found no open sky.
+        if sky_visible {
+            pass.set_pipeline(&self.pipes.sky);
+            pass.draw(0..3, 0..1);
+            draws += 1;
+            if !self.sky_list.batches.is_empty() {
+                pass.set_vertex_buffer(0, self.dyn_buf.buf.slice(..));
+                pass.set_pipeline(&self.pipes.sprite);
+                for b in &self.sky_list.batches {
+                    if let DynKind::Sprite(t) = &b.kind {
+                        pass.set_bind_group(1, &t.bind_group, &[]);
+                        pass.draw(
+                            dyn_bases[0] + b.start..dyn_bases[0] + b.start + b.count,
+                            0..1,
+                        );
+                        draws += 1;
+                    }
+                }
+            }
+        }
+
         // Clouds: depth first so overlapping faces don't double-blend.
-        if self.cloud_quads > 0 && !frame.sky.underwater && !frame.sky.in_lava {
+        if sky_visible && self.cloud_quads > 0 && !frame.sky.underwater && !frame.sky.in_lava {
             pass.set_vertex_buffer(0, self.cloud_buf.buf.slice(..));
             for p in [&self.pipes.cloud_depth, &self.pipes.cloud_color] {
                 pass.set_pipeline(p);
@@ -1281,23 +1301,25 @@ fn shader_source(arrays: usize, per_array: u32) -> String {
             2 + i
         );
     }
-    let sample = if arrays <= 1 {
-        "fn sample_block(uv: vec2<f32>, layer: u32) -> vec4<f32> {\n    return textureSample(blocks0, samp_blocks, uv, layer);\n}\n".to_string()
+    // Gradients are passed explicitly: merged quads repeat their UVs and
+    // isotropic faces rotate them per block, both of which would confuse
+    // implicit derivatives at tile seams.
+    let mut sample = String::from(
+        "fn sample_block_grad(uv: vec2<f32>, layer: u32, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {\n",
+    );
+    if arrays <= 1 {
+        sample += "    return textureSampleGrad(blocks0, samp_blocks, uv, layer, dx, dy);\n}\n";
     } else {
-        // Gradients are taken first (uniform control flow), then the right
-        // array is sampled with explicit gradients.
-        let mut s = String::from(
-            "fn sample_block(uv: vec2<f32>, layer: u32) -> vec4<f32> {\n    let dx = dpdx(uv);\n    let dy = dpdy(uv);\n",
-        );
-        s += &format!("    let a = layer / {per_array}u;\n    let l = layer % {per_array}u;\n");
+        sample +=
+            &format!("    let a = layer / {per_array}u;\n    let l = layer % {per_array}u;\n");
         for i in 0..arrays {
-            s += &format!(
+            sample += &format!(
                 "    if (a == {i}u) {{ return textureSampleGrad(blocks{i}, samp_blocks, uv, l, dx, dy); }}\n"
             );
         }
-        s += "    return vec4<f32>(1.0, 0.0, 1.0, 1.0);\n}\n";
-        s
-    };
+        sample += "    return vec4<f32>(1.0, 0.0, 1.0, 1.0);\n}\n";
+    }
+    sample += "fn sample_block(uv: vec2<f32>, layer: u32) -> vec4<f32> {\n    return sample_block_grad(uv, layer, dpdx(uv), dpdy(uv));\n}\n";
     WORLD_WGSL
         .replace("//#BLOCK_ARRAYS#", &decl)
         .replace("//#SAMPLE_BLOCK#", &sample)
@@ -1468,11 +1490,9 @@ fn create_pipelines(
     };
     Pipelines {
         sky: make(PipeDesc {
-            depth_compare: C::Always,
             ..base("sky", &l0, "vs_sky", "fs_sky", &[])
         }),
         sprite: make(PipeDesc {
-            depth_compare: C::Always,
             blend: additive,
             ..base("sun/moon", &l01, "vs_sprite", "fs_sprite", &dyn_buffers)
         }),

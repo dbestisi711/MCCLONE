@@ -493,40 +493,114 @@ impl CloudMap {
 
     /// Boxy clouds for cells `(cx0..cx0+n, cz0..cz0+n)`, positions relative
     /// to the corner of cell `(cx0, cz0)` at the cloud base. Faces between
-    /// neighbouring filled cells are skipped. Quads, 4 vertices each.
+    /// neighbouring filled cells are skipped; tops and bottoms are greedily
+    /// merged into rectangles (at most 8×8 cells, so the per-vertex fog
+    /// stays smooth) and side faces into runs. Quads, 4 vertices each.
     pub fn mesh(&self, cx0: i32, cz0: i32, n: i32, out: &mut Vec<CloudVertex>) {
         out.clear();
         let s = CLOUD_CELL;
         let t = CLOUD_THICKNESS;
-        for j in 0..n {
-            for i in 0..n {
-                let (cx, cz) = (cx0 + i, cz0 + j);
-                if !self.filled(cx, cz) {
+        let nu = n as usize;
+        let filled: Vec<bool> = (0..n * n)
+            .map(|k| self.filled(cx0 + k % n, cz0 + k / n))
+            .collect();
+        let at = |i: i32, j: i32| -> bool {
+            if i >= 0 && j >= 0 && i < n && j < n {
+                filled[(j * n + i) as usize]
+            } else {
+                self.filled(cx0 + i, cz0 + j)
+            }
+        };
+        let mut q = |p: [[f32; 3]; 4], shade: f32| {
+            for c in p {
+                out.push(CloudVertex { pos: c, shade });
+            }
+        };
+        // Tops and bottoms.
+        let mut used = vec![false; nu * nu];
+        for j in 0..nu {
+            for i in 0..nu {
+                if used[j * nu + i] || !filled[j * nu + i] {
                     continue;
                 }
-                let (x0, z0) = (i as f32 * s, j as f32 * s);
-                let (x1, z1) = (x0 + s, z0 + s);
-                let mut q = |p: [[f32; 3]; 4], shade: f32| {
-                    for c in p {
-                        out.push(CloudVertex { pos: c, shade });
+                let mut w = 1;
+                while i + w < nu && w < 8 && filled[j * nu + i + w] && !used[j * nu + i + w] {
+                    w += 1;
+                }
+                let mut h = 1;
+                'rows: while j + h < nu && h < 8 {
+                    for c in 0..w {
+                        let k = (j + h) * nu + i + c;
+                        if !filled[k] || used[k] {
+                            break 'rows;
+                        }
                     }
-                };
+                    h += 1;
+                }
+                for r in 0..h {
+                    for c in 0..w {
+                        used[(j + r) * nu + i + c] = true;
+                    }
+                }
+                let (x0, z0) = (i as f32 * s, j as f32 * s);
+                let (x1, z1) = (x0 + w as f32 * s, z0 + h as f32 * s);
                 q([[x0, t, z1], [x1, t, z1], [x1, t, z0], [x0, t, z0]], 1.0);
                 q(
                     [[x0, 0., z0], [x1, 0., z0], [x1, 0., z1], [x0, 0., z1]],
                     0.7,
                 );
-                if !self.filled(cx, cz - 1) {
-                    q([[x1, 0., z0], [x0, 0., z0], [x0, t, z0], [x1, t, z0]], 0.8);
+            }
+        }
+        // Side faces, merged into runs along each edge line.
+        for j in 0..n {
+            for (dz, shade) in [(-1, 0.8), (1, 0.8)] {
+                let mut i = 0;
+                while i < n {
+                    if !(at(i, j) && !at(i, j + dz)) {
+                        i += 1;
+                        continue;
+                    }
+                    let start = i;
+                    while i < n && i - start < 8 && at(i, j) && !at(i, j + dz) {
+                        i += 1;
+                    }
+                    let (xa, xb) = (start as f32 * s, i as f32 * s);
+                    let z = if dz < 0 {
+                        j as f32 * s
+                    } else {
+                        (j + 1) as f32 * s
+                    };
+                    if dz < 0 {
+                        q([[xb, 0., z], [xa, 0., z], [xa, t, z], [xb, t, z]], shade);
+                    } else {
+                        q([[xa, 0., z], [xb, 0., z], [xb, t, z], [xa, t, z]], shade);
+                    }
                 }
-                if !self.filled(cx, cz + 1) {
-                    q([[x0, 0., z1], [x1, 0., z1], [x1, t, z1], [x0, t, z1]], 0.8);
-                }
-                if !self.filled(cx + 1, cz) {
-                    q([[x1, 0., z1], [x1, 0., z0], [x1, t, z0], [x1, t, z1]], 0.9);
-                }
-                if !self.filled(cx - 1, cz) {
-                    q([[x0, 0., z0], [x0, 0., z1], [x0, t, z1], [x0, t, z0]], 0.9);
+            }
+        }
+        for i in 0..n {
+            for (dx, shade) in [(-1, 0.9), (1, 0.9)] {
+                let mut j = 0;
+                while j < n {
+                    if !(at(i, j) && !at(i + dx, j)) {
+                        j += 1;
+                        continue;
+                    }
+                    let start = j;
+                    while j < n && j - start < 8 && at(i, j) && !at(i + dx, j) {
+                        j += 1;
+                    }
+                    let (za, zb) = (start as f32 * s, j as f32 * s);
+                    let x = if dx < 0 {
+                        i as f32 * s
+                    } else {
+                        (i + 1) as f32 * s
+                    };
+                    if dx < 0 {
+                        q([[x, 0., za], [x, 0., zb], [x, t, zb], [x, t, za]], shade);
+                    } else {
+                        q([[x, 0., zb], [x, 0., za], [x, t, za], [x, t, zb]], shade);
+                    }
                 }
             }
         }

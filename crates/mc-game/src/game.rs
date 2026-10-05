@@ -855,18 +855,21 @@ pub fn run_screenshot(options: &Options, path: &str) {
             renderer.cull = mc_render::CullSettings { frustum, occlusion };
             renderer.render(&game.world, &frame);
             renderer.wait_gpu();
-            let t = std::time::Instant::now();
             let mut cpu = 0.0;
+            let mut times = Vec::with_capacity(options.bench as usize);
             for _ in 0..options.bench {
+                let t = std::time::Instant::now();
                 renderer.render(&game.world, &frame);
                 renderer.wait_gpu();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
                 cpu += renderer.stats.cpu_ms as f64;
             }
-            let wall = t.elapsed().as_secs_f64() * 1000.0 / options.bench as f64;
+            times.sort_by(f64::total_cmp);
             let s = renderer.stats;
             log::info!(
-                "bench [{label}]: {:.2} ms/frame (cpu {:.2} ms: cull {:.2}, encode {:.2}), {} sections drawn, {} draws, {:.0}k triangles",
-                wall,
+                "bench [{label}]: median {:.2} ms, min {:.2} ms per frame (cpu {:.2} ms: cull {:.2}, encode {:.2}), {} sections drawn, {} draws, {:.0}k triangles",
+                times[times.len() / 2],
+                times[0],
                 cpu / options.bench as f64,
                 s.cull_ms,
                 s.encode_ms,

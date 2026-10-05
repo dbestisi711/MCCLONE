@@ -103,9 +103,6 @@ fn fog_tint(rel: vec3<f32>) -> vec3<f32> {
     return sky_color(h / l);
 }
 
-fn apply_fog(c: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
-    return mix(c, fog_tint(rel), fog_amount(rel));
-}
 
 fn face_shade(n: u32) -> f32 {
     var shades = array<f32, 8>(1.0, 0.5, 0.8, 0.8, 0.6, 0.6, 0.9, 1.0);
@@ -197,6 +194,10 @@ struct ChunkOut {
     @location(2) light: vec3<f32>,
     @location(3) tint: vec3<f32>,
     @location(4) rel: vec3<f32>,
+    // normal (3 bits) | isotropic << 3
+    @location(5) @interpolate(flat) info: u32,
+    // fog colour (evaluated per vertex: the sky gradient is costly per pixel)
+    @location(6) fog: vec3<f32>,
 }
 
 @vertex
@@ -211,7 +212,16 @@ fn vs_chunk(
     let flags = w0 >> 30u;
     var rel = origin.xyz + p;
     let world = rel + g.cam.xyz;
-    let uv = vec2<f32>(f32(w1 & 31u), f32((w1 >> 5u) & 31u)) / 16.0;
+    if ((w2 >> 29u) & 1u) != 0u {
+        // Seal T-junctions: grow the face a hair in its plane, more with
+        // distance (sub-pixel everywhere).
+        let corner = (w2 >> 27u) & 3u;
+        let sr = select(-1.0, 1.0, corner == 1u || corner == 2u);
+        let su = select(-1.0, 1.0, corner >= 2u);
+        let e = max(0.0008, length(rel) * 0.00012);
+        rel += (face_right(normal) * sr + face_up(normal) * su) * e;
+    }
+    let uv = vec2<f32>(f32(w1 & 511u), f32((w1 >> 9u) & 511u)) / 16.0;
     if ((flags & 1u) != 0u) {
         // Leaves and plants sway a little (plants only at the top).
         let t = g.cam.w;
@@ -223,15 +233,15 @@ fn vs_chunk(
         rel.x += sin(t * 1.7 + ph) * amp;
         rel.z += cos(t * 1.3 + ph * 1.1) * amp;
     }
-    if ((flags & 2u) != 0u && fract(p.y) > 0.01) {
-        // Gentle swell on liquid surfaces (side faces follow the top edge).
-        rel.y += (sin(g.cam.w * 1.4 + world.x * 0.9 + world.z * 0.6) - 1.0) * 0.012;
-    }
-    let tile = (w1 >> 10u) & 4095u;
-    let ao = (w1 >> 22u) & 3u;
-    let sky = f32((w1 >> 24u) & 63u) / 4.0;
-    let blk = f32((w2 >> 24u) & 63u) / 4.0;
-    let tint = vec3<f32>(f32(w2 & 255u), f32((w2 >> 8u) & 255u), f32((w2 >> 16u) & 255u)) / 255.0;
+    let tile = (w1 >> 18u) & 4095u;
+    let ao = w1 >> 30u;
+    let sky = f32((w2 >> 16u) & 31u) / 2.0;
+    let blk = f32((w2 >> 21u) & 31u) / 2.0;
+    let tint = vec3<f32>(
+        f32(w2 & 31u) / 31.0,
+        f32((w2 >> 5u) & 63u) / 63.0,
+        f32((w2 >> 11u) & 31u) / 31.0,
+    );
     let l = world_light(sky, blk) * face_shade(normal) * ao_factor(ao);
     var o: ChunkOut;
     o.clip = g.view_proj * vec4<f32>(rel, 1.0);
@@ -240,34 +250,114 @@ fn vs_chunk(
     o.light = to_linear(l);
     o.tint = to_linear(tint);
     o.rel = rel;
+    o.info = normal | (((w2 >> 26u) & 1u) << 3u);
+    o.fog = fog_tint(rel);
     return o;
+}
+
+fn face_right(n: u32) -> vec3<f32> {
+    var r = array<vec3<f32>, 8>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(-1.0, 0.0, 0.0),
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, -1.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+    );
+    return r[min(n, 7u)];
+}
+
+fn face_up(n: u32) -> vec3<f32> {
+    var u = array<vec3<f32>, 8>(
+        vec3<f32>(0.0, 0.0, -1.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+    );
+    return u[min(n, 7u)];
+}
+
+fn face_normal(n: u32) -> vec3<f32> {
+    var normals = array<vec3<f32>, 8>(
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, -1.0, 0.0),
+        vec3<f32>(0.0, 0.0, -1.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(-1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+    );
+    return normals[min(n, 7u)];
+}
+
+// Sample a chunk fragment's tile. Isotropic faces (grass top, sand...) get
+// a random quarter turn per block, computed from the world position so it
+// also works on greedy-merged quads.
+fn chunk_sample(in: ChunkOut) -> vec4<f32> {
+    let ddx = dpdx(in.uv);
+    let ddy = dpdy(in.uv);
+    var uv = in.uv;
+    if ((in.info & 8u) != 0u) {
+        let n = in.info & 7u;
+        let wp = in.rel + g.cam.xyz;
+        let b = floor(wp - face_normal(n) * 0.001);
+        let lp = clamp(wp - b, vec3<f32>(0.0), vec3<f32>(0.9999));
+        var f: vec2<f32>;
+        switch n {
+            case 0u: { f = vec2<f32>(lp.x, lp.z); }
+            case 1u: { f = vec2<f32>(lp.x, 1.0 - lp.z); }
+            case 2u: { f = vec2<f32>(1.0 - lp.x, 1.0 - lp.y); }
+            case 3u: { f = vec2<f32>(lp.x, 1.0 - lp.y); }
+            case 4u: { f = vec2<f32>(1.0 - lp.z, 1.0 - lp.y); }
+            default: { f = vec2<f32>(lp.z, 1.0 - lp.y); }
+        }
+        let bi = vec3<i32>(b);
+        let h = (u32(bi.x) * 0x9E3779B1u) ^ (u32(bi.z) * 0x85EBCA77u) ^ (u32(bi.y) * 0xC2B2AE3Du);
+        let r = ((h * 0x27D4EB2Fu) >> 13u) & 3u;
+        if (r == 1u) {
+            f = vec2<f32>(1.0 - f.y, f.x);
+        } else if (r == 2u) {
+            f = vec2<f32>(1.0) - f;
+        } else if (r == 3u) {
+            f = vec2<f32>(f.y, 1.0 - f.x);
+        }
+        uv = f;
+    }
+    return sample_block_grad(uv, in.layer, ddx, ddy);
 }
 
 @fragment
 fn fs_chunk_opaque(in: ChunkOut) -> @location(0) vec4<f32> {
-    let t = sample_block(in.uv, in.layer);
+    let t = chunk_sample(in);
     // Opaque Bedrock textures carry a tint mask in alpha (grass sides).
     let c = t.rgb * mix(vec3<f32>(1.0), in.tint, t.a) * in.light;
-    return vec4<f32>(apply_fog(c, in.rel), 1.0);
+    return vec4<f32>(mix(c, in.fog, fog_amount(in.rel)), 1.0);
 }
 
 @fragment
 fn fs_chunk_cutout(in: ChunkOut) -> @location(0) vec4<f32> {
-    let t = sample_block(in.uv, in.layer);
+    let t = chunk_sample(in);
     if (t.a < 0.5) {
         discard;
     }
     let c = t.rgb * in.tint * in.light;
-    return vec4<f32>(apply_fog(c, in.rel), 1.0);
+    return vec4<f32>(mix(c, in.fog, fog_amount(in.rel)), 1.0);
 }
 
 @fragment
 fn fs_chunk_translucent(in: ChunkOut) -> @location(0) vec4<f32> {
-    let t = sample_block(in.uv, in.layer);
+    let t = chunk_sample(in);
     let c = t.rgb * in.tint * in.light;
     let f = fog_amount(in.rel);
     let a = mix(t.a, 1.0, f * f);
-    return vec4<f32>(mix(c, fog_tint(in.rel), f), a);
+    return vec4<f32>(mix(c, in.fog, f), a);
 }
 
 // ---------------------------------------------------------------- dynamic geometry
@@ -292,6 +382,7 @@ struct DynOut {
     @location(3) tint: vec4<f32>,
     @location(4) rel: vec3<f32>,
     @location(5) hurt: f32,
+    @location(6) fog: vec3<f32>,
 }
 
 @vertex
@@ -305,12 +396,13 @@ fn vs_dyn(v: DynIn) -> DynOut {
     o.tint = vec4<f32>(to_linear(v.color.rgb), v.color.a);
     o.rel = v.pos;
     o.hurt = v.light.w;
+    o.fog = fog_tint(v.pos);
     return o;
 }
 
 fn finish_dyn(rgb: vec3<f32>, a: f32, in: DynOut) -> vec4<f32> {
     let c = mix(rgb * in.light, vec3<f32>(0.6, 0.0, 0.0), in.hurt * 0.55);
-    return vec4<f32>(apply_fog(c, in.rel), a);
+    return vec4<f32>(mix(c, in.fog, fog_amount(in.rel)), a);
 }
 
 @fragment
@@ -350,12 +442,15 @@ fn fs_crack(in: DynOut) -> @location(0) vec4<f32> {
 fn vs_sprite(v: DynIn) -> DynOut {
     var o: DynOut;
     o.clip = g.view_proj * vec4<f32>(v.pos, 1.0);
+    // At infinity: only drawn where nothing else is (depth still 0).
+    o.clip.z = 0.0;
     o.uv = v.uv;
     o.layer = v.layer;
     o.light = vec3<f32>(1.0);
     o.tint = v.color;
     o.rel = v.pos;
     o.hurt = 0.0;
+    o.fog = vec3<f32>(0.0);
     return o;
 }
 
@@ -370,27 +465,32 @@ fn fs_sprite(in: DynOut) -> @location(0) vec4<f32> {
 struct CloudOut {
     @builtin(position) @invariant clip: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) rel: vec3<f32>,
+    @location(2) sky: vec3<f32>,
 }
 
 @vertex
 fn vs_cloud(@location(0) pos: vec3<f32>, @location(1) shade: f32) -> CloudOut {
     let rel = pos + g.cloud.xyz;
-    let d = length(rel.xz);
-    let fade = 1.0 - smoothstep(g.cloud_color.w * 0.55, g.cloud_color.w, d);
     var c = g.cloud_color.rgb * shade;
     let h = vec3<f32>(rel.x, 0.0, rel.z);
+    var sky = c;
     if (length(h) > 0.001) {
-        c = mix(c, sky_color(normalize(h)), (1.0 - fade) * 0.8);
+        sky = sky_color(normalize(h));
     }
     var o: CloudOut;
     o.clip = g.view_proj * vec4<f32>(rel, 1.0);
-    o.color = vec4<f32>(c, g.cloud.w * fade);
+    o.color = vec4<f32>(c, 1.0);
+    o.rel = rel;
+    o.sky = sky;
     return o;
 }
 
 @fragment
 fn fs_cloud(in: CloudOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let fade = 1.0 - smoothstep(g.cloud_color.w * 0.55, g.cloud_color.w, length(in.rel.xz));
+    let c = mix(in.color.rgb, in.sky, (1.0 - fade) * 0.8);
+    return vec4<f32>(c, g.cloud.w * fade);
 }
 
 // ---------------------------------------------------------------- lines

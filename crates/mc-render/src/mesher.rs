@@ -11,12 +11,26 @@
 //! | word | bits |
 //! |---|---|
 //! | 0 | x+16 (9) · y+16 (9) · z+16 (9) in 1/16 block · normal (3) · flags (2) |
-//! | 1 | u (5) · v (5) in 1/16 · tile (12) · ao (2) · sky light ×4 (6) |
-//! | 2 | tint r, g, b (8 each, sRGB) · block light ×4 (6) |
+//! | 1 | u (9) · v (9) in 1/16 (repeat past 16) · tile (12) · ao (2) |
+//! | 2 | tint RGB565 (16, sRGB) · sky light ×2 (5) · block light ×2 (5) · isotropic (1) · corner (2) · seal (1) |
 //!
 //! Positions are relative to the section origin; the per-draw instance
 //! supplies the camera-relative origin. Quads use a shared index buffer
 //! (`0 1 2 0 2 3`); the anisotropy fix for AO rotates the vertex order.
+//!
+//! ## Greedy merging
+//!
+//! Full faces of cubes (and liquid tops) whose four corners have identical
+//! light, AO and tint are collected per face direction and slice, then
+//! merged into rectangles (the block array sampler repeats, so UVs simply
+//! run past one tile). Faces with varying light keep per-block quads, so
+//! smooth lighting and AO are unchanged. Isotropic textures are rotated per
+//! block in the fragment shader, which keeps merged quads possible.
+//!
+//! Merging creates T-junctions, which can leave pinhole cracks. Opaque and
+//! cutout cube faces are therefore "sealed": each vertex records its corner
+//! and the vertex shader pushes it outward in the face plane by a tiny,
+//! distance-scaled amount so neighbouring faces overlap.
 
 use std::sync::Arc;
 
@@ -281,17 +295,18 @@ const FACES: [FaceDef; 6] = [
 const UP: usize = 0;
 const DOWN: usize = 1;
 
-/// Texture coordinates (1/16) of a block-local point on face `f`.
+/// Texture coordinates (1/16) of a point on face `f` of a box starting at
+/// a block corner; `s` is the box extent in whole blocks ×16 per axis.
 #[inline]
-fn auto_uv(f: usize, c: [i32; 3]) -> [i32; 2] {
+fn auto_uv(f: usize, c: [i32; 3], s: [i32; 3]) -> [i32; 2] {
     let [x, y, z] = c;
     match f {
         0 => [x, z],
-        1 => [x, 16 - z],
-        2 => [16 - x, 16 - y],
-        3 => [x, 16 - y],
-        4 => [16 - z, 16 - y],
-        _ => [z, 16 - y],
+        1 => [x, s[2] - z],
+        2 => [s[0] - x, s[1] - y],
+        3 => [x, s[1] - y],
+        4 => [s[2] - z, s[1] - y],
+        _ => [z, s[1] - y],
     }
 }
 
@@ -412,11 +427,40 @@ struct Quad {
     normal: u32,
     tile: u32,
     ao: [u8; 4],
+    /// Light levels ×2 (0..30).
     sky: [u8; 4],
     blk: [u8; 4],
     tint: [[u8; 3]; 4],
     flags: u32,
+    iso: bool,
+    /// Grow the quad slightly in its plane (closes T-junction cracks).
+    seal: bool,
 }
+
+/// Everything that must match for two faces to merge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct MergeKey {
+    tile: u16,
+    layer: u8,
+    flags: u8,
+    ao: u8,
+    sky: u8,
+    blk: u8,
+    tint: [u8; 3],
+    /// Top of the face's box along the normal axis (16, or 14 for liquids).
+    height: u8,
+    iso: bool,
+}
+
+/// Face direction → (normal axis, u axis, v axis) of the merge grid.
+const MERGE_AXES: [(usize, usize, usize); 6] = [
+    (1, 0, 2),
+    (1, 0, 2),
+    (2, 0, 1),
+    (2, 0, 1),
+    (0, 2, 1),
+    (0, 2, 1),
+];
 
 #[inline]
 fn push_quad(out: &mut Vec<u32>, q: &Quad, flip: bool) {
@@ -428,16 +472,20 @@ fn push_quad(out: &mut Vec<u32>, q: &Quad, flip: bool) {
             | (((p[2] + 16) as u32 & 511) << 18)
             | (q.normal << 27)
             | (q.flags << 30);
-        let w1 = (q.uv[k][0] as u32 & 31)
-            | ((q.uv[k][1] as u32 & 31) << 5)
-            | ((q.tile & 4095) << 10)
-            | ((q.ao[k] as u32 & 3) << 22)
-            | ((q.sky[k] as u32 & 63) << 24);
+        let w1 = (q.uv[k][0] as u32 & 511)
+            | ((q.uv[k][1] as u32 & 511) << 9)
+            | ((q.tile & 4095) << 18)
+            | ((q.ao[k] as u32 & 3) << 30);
         let t = q.tint[k];
-        let w2 = t[0] as u32
-            | ((t[1] as u32) << 8)
-            | ((t[2] as u32) << 16)
-            | ((q.blk[k] as u32 & 63) << 24);
+        let rgb565 = ((t[0] as u32 * 31 + 127) / 255)
+            | (((t[1] as u32 * 63 + 127) / 255) << 5)
+            | (((t[2] as u32 * 31 + 127) / 255) << 11);
+        let w2 = rgb565
+            | ((q.sky[k] as u32 & 31) << 16)
+            | ((q.blk[k] as u32 & 31) << 21)
+            | ((q.iso as u32) << 26)
+            | ((k as u32) << 27)
+            | ((q.seal as u32) << 29);
         out.extend_from_slice(&[w0, w1, w2]);
     }
 }
@@ -456,16 +504,8 @@ struct Mesher<'a> {
     out: [Vec<u32>; 3],
     /// World block coordinates of the section origin.
     origin: [i32; 3],
-    /// Quarter turns applied to full-face UVs (isotropic faces).
-    rot: usize,
-}
-
-/// Stable per-block hash (world coordinates).
-#[inline]
-fn block_hash(x: i32, y: i32, z: i32) -> u32 {
-    (x as u32).wrapping_mul(0x9E37_79B1)
-        ^ (z as u32).wrapping_mul(0x85EB_CA77)
-        ^ (y as u32).wrapping_mul(0xC2B2_AE3D)
+    /// Mergeable faces: (face, slice, v, u) sort key and merge key.
+    pending: Vec<(u32, MergeKey)>,
 }
 
 impl Mesher<'_> {
@@ -516,15 +556,15 @@ impl Mesher<'_> {
                 sb += (l & 15) as u32;
                 n += 1;
             }
-            sky[k] = ((ss * 4 + n / 2) / n) as u8;
-            blk[k] = ((sb * 4 + n / 2) / n) as u8;
+            sky[k] = ((ss * 2 + n / 2) / n) as u8;
+            blk[k] = ((sb * 2 + n / 2) / n) as u8;
         }
         (ao, sky, blk)
     }
 
     fn flat_light(&self, pi: usize) -> ([u8; 4], [u8; 4]) {
         let l = self.g.light[pi];
-        ([(l >> 4) * 4; 4], [(l & 15) * 4; 4])
+        ([(l >> 4) * 2; 4], [(l & 15) * 2; 4])
     }
 
     fn tint4(&mut self, kind: TintKind, corners: &[[i32; 3]; 4], bx: i32, bz: i32) -> [[u8; 3]; 4] {
@@ -540,21 +580,24 @@ impl Mesher<'_> {
         t
     }
 
-    /// Emit face `f` of an axis-aligned box `[lo, hi]` (1/16 units, block
-    /// local) of the block at (x, y, z).
+    /// Emit face `f` of an axis-aligned box `[lo, hi]` (1/16 units,
+    /// relative to block (x, y, z)). `span` is the box's extent in whole
+    /// blocks ×16 (16 for single blocks), used to orient the texture.
     #[allow(clippy::too_many_arguments)]
-    fn box_face(
+    fn emit_box(
         &mut self,
         layer: usize,
         (x, y, z): (i32, i32, i32),
         f: usize,
         lo: [i32; 3],
         hi: [i32; 3],
-        tile: u16,
-        tint: TintKind,
-        light: ([u8; 4], [u8; 4], [u8; 4]),
+        span: [i32; 3],
         uv_full: bool,
+        tile: u16,
+        tint4: [[u8; 3]; 4],
+        light: ([u8; 4], [u8; 4], [u8; 4]),
         flags: u32,
+        iso: bool,
     ) {
         let d = &FACES[f];
         let mut pos = [[0i32; 3]; 4];
@@ -569,15 +612,10 @@ impl Mesher<'_> {
             uv[k] = if uv_full {
                 [[0, 16], [16, 16], [16, 0], [0, 0]][k]
             } else {
-                auto_uv(f, local)
+                auto_uv(f, local, span)
             };
             pos[k] = [x * 16 + local[0], y * 16 + local[1], z * 16 + local[2]];
         }
-        if self.rot != 0 {
-            let r = self.rot;
-            uv = [uv[r & 3], uv[(r + 1) & 3], uv[(r + 2) & 3], uv[(r + 3) & 3]];
-        }
-        let tint4 = self.tint4(tint, &pos, 0, 0);
         let (ao, sky, blk) = light;
         let q = Quad {
             pos,
@@ -589,9 +627,193 @@ impl Mesher<'_> {
             blk,
             tint: tint4,
             flags,
+            iso,
+            // Full-block faces (any height along the normal, e.g. liquid
+            // tops); also translucent ones: a sub-pixel double blend is far
+            // less visible than a pinhole.
+            seal: !uv_full && lo == [0; 3] && {
+                let (_, ua, va) = MERGE_AXES[f];
+                hi[ua] % 16 == 0 && hi[va] % 16 == 0
+            },
         };
         let flip = should_flip(&q);
         push_quad(&mut self.out[layer], &q, flip);
+    }
+
+    /// Emit face `f` of a box inside one block, tinted per vertex corner.
+    #[allow(clippy::too_many_arguments)]
+    fn box_face(
+        &mut self,
+        layer: usize,
+        (x, y, z): (i32, i32, i32),
+        f: usize,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        tile: u16,
+        tint: TintKind,
+        light: ([u8; 4], [u8; 4], [u8; 4]),
+        uv_full: bool,
+        flags: u32,
+    ) {
+        let corners = FACES[f].corners.map(|c| {
+            [
+                x * 16 + if c[0] == 1 { hi[0] } else { lo[0] },
+                y * 16 + if c[1] == 1 { hi[1] } else { lo[1] },
+                z * 16 + if c[2] == 1 { hi[2] } else { lo[2] },
+            ]
+        });
+        let tint4 = self.tint4(tint, &corners, 0, 0);
+        self.emit_box(
+            layer,
+            (x, y, z),
+            f,
+            lo,
+            hi,
+            [16; 3],
+            uv_full,
+            tile,
+            tint4,
+            light,
+            flags,
+            false,
+        );
+    }
+
+    /// Queue a full face for merging if it is uniform, else emit it now.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_or_emit(
+        &mut self,
+        layer: usize,
+        (x, y, z): (i32, i32, i32),
+        f: usize,
+        height: i32,
+        tile: u16,
+        tint: TintKind,
+        light: ([u8; 4], [u8; 4], [u8; 4]),
+        flags: u32,
+        iso: bool,
+    ) {
+        let mut hi = [16; 3];
+        hi[1] = height;
+        let corners = FACES[f].corners.map(|c| {
+            [
+                x * 16 + if c[0] == 1 { hi[0] } else { 0 },
+                y * 16 + if c[1] == 1 { hi[1] } else { 0 },
+                z * 16 + if c[2] == 1 { hi[2] } else { 0 },
+            ]
+        });
+        let tint4 = self.tint4(tint, &corners, 0, 0);
+        let (ao, sky, blk) = light;
+        let uniform = ao.iter().all(|&a| a == ao[0])
+            && sky.iter().all(|&a| a == sky[0])
+            && blk.iter().all(|&a| a == blk[0])
+            && tint4.iter().all(|&t| t == tint4[0]);
+        // Swaying faces move per vertex, which a merged quad can't follow.
+        if !uniform || flags & FLAG_WAVE != 0 {
+            self.emit_box(
+                layer,
+                (x, y, z),
+                f,
+                [0; 3],
+                hi,
+                [16; 3],
+                false,
+                tile,
+                tint4,
+                light,
+                flags,
+                iso,
+            );
+            return;
+        }
+        let (na, ua, va) = MERGE_AXES[f];
+        let p = [x, y, z];
+        let key = (f as u32) << 12 | (p[na] as u32) << 8 | (p[va] as u32) << 4 | p[ua] as u32;
+        self.pending.push((
+            key,
+            MergeKey {
+                tile,
+                layer: layer as u8,
+                flags: flags as u8,
+                ao: ao[0],
+                sky: sky[0],
+                blk: blk[0],
+                tint: tint4[0],
+                height: height as u8,
+                iso,
+            },
+        ));
+    }
+
+    /// Greedy-merge the queued uniform faces into rectangles.
+    fn flush_merged(&mut self) {
+        let mut pending = std::mem::take(&mut self.pending);
+        pending.sort_unstable_by_key(|p| p.0);
+        let mut grid: [Option<MergeKey>; 256] = [None; 256];
+        let mut i = 0;
+        while i < pending.len() {
+            let group = pending[i].0 >> 8;
+            let mut j = i;
+            while j < pending.len() && pending[j].0 >> 8 == group {
+                let (k, m) = pending[j];
+                grid[(k & 255) as usize] = Some(m);
+                j += 1;
+            }
+            let f = (group >> 4) as usize;
+            let slice = (group & 15) as i32;
+            let (na, ua, va) = MERGE_AXES[f];
+            for v in 0..16usize {
+                for u in 0..16usize {
+                    let Some(k) = grid[v * 16 + u] else { continue };
+                    let mut w = 1;
+                    while u + w < 16 && grid[v * 16 + u + w] == Some(k) {
+                        w += 1;
+                    }
+                    let mut h = 1;
+                    'rows: while v + h < 16 {
+                        for c in 0..w {
+                            if grid[(v + h) * 16 + u + c] != Some(k) {
+                                break 'rows;
+                            }
+                        }
+                        h += 1;
+                    }
+                    for r in 0..h {
+                        for c in 0..w {
+                            grid[(v + r) * 16 + u + c] = None;
+                        }
+                    }
+                    let mut base = [0i32; 3];
+                    base[na] = slice;
+                    base[ua] = u as i32;
+                    base[va] = v as i32;
+                    let mut hi = [16i32; 3];
+                    hi[ua] = 16 * w as i32;
+                    hi[va] = 16 * h as i32;
+                    if na == 1 {
+                        hi[1] = k.height as i32;
+                    }
+                    let span = [hi[0].max(16), hi[1].max(16), hi[2].max(16)];
+                    self.emit_box(
+                        k.layer as usize,
+                        (base[0], base[1], base[2]),
+                        f,
+                        [0; 3],
+                        hi,
+                        span,
+                        false,
+                        k.tile,
+                        [k.tint; 4],
+                        ([k.ao; 4], [k.sky; 4], [k.blk; 4]),
+                        k.flags as u32,
+                        k.iso,
+                    );
+                }
+            }
+            i = j;
+        }
+        pending.clear();
+        self.pending = pending;
     }
 
     fn block(&mut self, x: i32, y: i32, z: i32) {
@@ -612,20 +834,28 @@ impl Mesher<'_> {
             Shape::None => {}
             Shape::Cube => {
                 for f in 0..6 {
-                    let iso = self.t.isotropic.get(id as usize).is_some_and(|i| i[f]);
                     let ni = (pi as isize + AO.q[f]) as usize;
                     let nid = self.g.ids[ni];
                     let n = self.t.info(nid);
                     if n.occludes || (info.cull_same && nid == id) {
                         continue;
                     }
+                    let iso = self.t.isotropic.get(id as usize).is_some_and(|i| i[f]);
                     let light = self.face_light(pi, f, true);
-                    self.rot = if iso {
-                        let [ox, oy, oz] = self.origin;
-                        ((block_hash(ox + x, oy + y, oz + z).wrapping_mul(0x27D4_EB2F) >> 13) & 3)
-                            as usize
-                    } else {
-                        0
+                    let overlay = self.t.overlay.get(id as usize).and_then(|o| o[f]);
+                    let Some(ov) = overlay else {
+                        self.merge_or_emit(
+                            layer,
+                            (x, y, z),
+                            f,
+                            16,
+                            faces[f],
+                            tint_for(f),
+                            light,
+                            wave,
+                            iso,
+                        );
+                        continue;
                     };
                     self.box_face(
                         layer,
@@ -639,21 +869,18 @@ impl Mesher<'_> {
                         false,
                         wave,
                     );
-                    if let Some(ov) = self.t.overlay.get(id as usize).and_then(|o| o[f]) {
-                        self.box_face(
-                            LAYER_CUTOUT,
-                            (x, y, z),
-                            f,
-                            [0; 3],
-                            [16; 3],
-                            ov,
-                            info.tint,
-                            light,
-                            false,
-                            0,
-                        );
-                    }
-                    self.rot = 0;
+                    self.box_face(
+                        LAYER_CUTOUT,
+                        (x, y, z),
+                        f,
+                        [0; 3],
+                        [16; 3],
+                        ov,
+                        info.tint,
+                        light,
+                        false,
+                        0,
+                    );
                 }
             }
             Shape::Liquid => {
@@ -669,6 +896,20 @@ impl Mesher<'_> {
                         continue;
                     }
                     let light = self.face_light(pi, f, false);
+                    if f <= DOWN {
+                        self.merge_or_emit(
+                            layer,
+                            (x, y, z),
+                            f,
+                            h,
+                            faces[f],
+                            tint_for(f),
+                            light,
+                            FLAG_LIQUID,
+                            false,
+                        );
+                        continue;
+                    }
                     self.box_face(
                         layer,
                         (x, y, z),
@@ -815,6 +1056,8 @@ impl Mesher<'_> {
                 blk: b,
                 tint: tint4,
                 flags,
+                iso: false,
+                seal: false,
             };
             push_quad(&mut self.out[layer], &front, false);
             let back = Quad {
@@ -1013,7 +1256,7 @@ pub fn mesh_section(input: MeshInput, tables: &MeshTables) -> MeshOutput {
                 mc_core::WORLD_MIN_Y + input.sy as i32 * 16,
                 input.chunk.z * 16,
             ],
-            rot: 0,
+            pending: Vec::new(),
         };
         let sec = input.sections[13].as_ref().unwrap();
         let blocks = sec.blocks().unwrap();
@@ -1026,6 +1269,7 @@ pub fn mesh_section(input: MeshInput, tables: &MeshTables) -> MeshOutput {
                 }
             }
         }
+        m.flush_merged();
         layers = m.out;
         conn = connectivity(&g, tables);
     }
@@ -1098,7 +1342,7 @@ mod tests {
             input_with(&[(5, 5, 5, blocks::STONE), (6, 5, 5, blocks::STONE)]),
             &t,
         );
-        assert_eq!(out.quads(LAYER_OPAQUE), 10);
+        assert_eq!(out.quads(LAYER_OPAQUE), 6);
     }
 
     #[test]
@@ -1109,13 +1353,13 @@ mod tests {
             &t,
         );
         // (The test tile has no alpha, so water lands in the opaque layer.)
-        assert_eq!(out.quads(LAYER_TRANSLUCENT) + out.quads(LAYER_OPAQUE), 10);
+        assert_eq!(out.quads(LAYER_TRANSLUCENT) + out.quads(LAYER_OPAQUE), 8);
         let out = mesh_section(
             input_with(&[(5, 5, 5, blocks::GLASS), (5, 6, 5, blocks::GLASS)]),
             &t,
         );
-        assert_eq!(out.quads(LAYER_CUTOUT), 10);
-        // Leaves keep inner faces (fancy leaves).
+        assert_eq!(out.quads(LAYER_CUTOUT), 6);
+        // Leaves keep inner faces (fancy leaves) and, swaying, are not merged.
         let out = mesh_section(
             input_with(&[(5, 5, 5, blocks::OAK_LEAVES), (5, 6, 5, blocks::OAK_LEAVES)]),
             &t,
@@ -1124,6 +1368,33 @@ mod tests {
         // A plant is two double-sided quads.
         let out = mesh_section(input_with(&[(5, 5, 5, blocks::POPPY)]), &t);
         assert_eq!(out.quads(LAYER_CUTOUT), 4);
+    }
+
+    #[test]
+    fn greedy_merges_uniform_faces() {
+        let t = tables();
+        let mut b = vec![];
+        for z in 0..16 {
+            for x in 0..16 {
+                b.push((x, 8, z, blocks::STONE));
+            }
+        }
+        // A full 16x16 floor: one quad per side.
+        let out = mesh_section(input_with(&b), &t);
+        assert_eq!(out.quads(LAYER_OPAQUE), 6);
+        // UVs of the merged top run across 16 tiles.
+        let max_u = out.layers[LAYER_OPAQUE]
+            .chunks_exact(3)
+            .map(|v| v[1] & 511)
+            .max()
+            .unwrap();
+        assert_eq!(max_u, 256);
+        // A block on top breaks uniform AO around it, so faces near it stay
+        // separate but the far parts still merge.
+        b.push((8, 9, 8, blocks::STONE));
+        let out = mesh_section(input_with(&b), &t);
+        let quads = out.quads(LAYER_OPAQUE);
+        assert!(quads > 6 && quads < 40, "{quads}");
     }
 
     #[test]
@@ -1138,7 +1409,7 @@ mod tests {
         let mut found_dark = false;
         for v in words.chunks_exact(3) {
             let normal = (v[0] >> 27) & 7;
-            let ao = (v[1] >> 22) & 3;
+            let ao = v[1] >> 30;
             if normal == 0 && ao < 3 {
                 found_dark = true;
             }
