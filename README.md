@@ -19,6 +19,23 @@ libraries (`libxkbcommon-x11-0` on Debian/Ubuntu).
 Useful options: `--seed N`, `--rd N` (render distance in chunks), `--survival`.
 `--screenshot out.png` renders one frame headlessly and exits.
 
+## Windows build
+
+A packaged build is a folder with `mcclone.exe` and `pack.bin` (the pack files
+the game uses, ~6 MB); copy it anywhere and double-click the exe. Needs
+Windows 10/11 and a GPU with DirectX 12 or Vulkan.
+
+- **On Windows:** install Rust from https://rustup.rs, then in the repo run
+  `cargo build --release` and
+  `cargo run --release -p mc-game --example bundle_web -- target/release/pack.bin`.
+  The game is `target/release/mcclone.exe` (it also runs without `pack.bin`
+  when started inside the repo, reading the pack folders directly).
+- **From Linux:** `./scripts/package-windows.sh` cross-compiles and writes
+  `dist/mcclone-windows.zip` (needs `mingw-w64` and
+  `rustup target add x86_64-pc-windows-gnu`).
+- **On GitHub:** run the "Windows build" workflow from the Actions tab and
+  download the `mcclone-windows` artifact.
+
 ## Web version (browser, iPad)
 
 The game also runs in the browser through WebAssembly and WebGPU (Chrome,

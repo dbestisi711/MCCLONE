@@ -191,12 +191,28 @@ impl Pack {
         }
     }
 
-    /// Locate the pack: `$MC_PACK_DIR`, else walk up from the current dir and
+    /// Locate the pack: `$MC_PACK_DIR`, else a `pack.bin` bundle next to the
+    /// executable (packaged builds), else walk up from the current dir and
     /// the executable's dir looking for `blocks.json` + `textures/`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn find() -> Option<Pack> {
         if let Ok(p) = std::env::var("MC_PACK_DIR") {
             return Some(Pack::open(p));
+        }
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+        {
+            let bundle = dir.join("pack.bin");
+            if let Ok(bytes) = std::fs::read(&bundle) {
+                match Pack::from_bundle(&bytes) {
+                    Ok(mut pack) => {
+                        pack.root = bundle;
+                        return Some(pack);
+                    }
+                    Err(e) => log::warn!("{}: {e}", bundle.display()),
+                }
+            }
         }
         let mut starts = vec![];
         if let Ok(cwd) = std::env::current_dir() {

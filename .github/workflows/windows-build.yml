@@ -1,0 +1,29 @@
+# Builds the Windows release (mcclone.exe + pack.bin) with MSVC and uploads it
+# as a workflow artifact. Runs when started by hand from the Actions tab.
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+        run: cargo build --release -p mc-game --bin mcclone
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/mcclone-windows | Out-Null
+          Copy-Item target/release/mcclone.exe dist/mcclone-windows/
+          cargo run --release -p mc-game --example bundle_web -- dist/mcclone-windows/pack.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcclone-windows
+          path: dist/mcclone-windows

@@ -4,3 +4,4 @@
 /screenshots/*.tmp
 .claude/worktrees/
 /web/dist/
+/dist/
