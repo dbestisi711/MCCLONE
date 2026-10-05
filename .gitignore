@@ -2,3 +2,4 @@
 /target
 **/target
 /screenshots/*.tmp
+.claude/worktrees/
