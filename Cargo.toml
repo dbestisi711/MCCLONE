@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mc-core",
+    "crates/mc-assets",
+    "crates/mc-worldgen",
+    "crates/mc-entity",
+    "crates/mc-ui",
+    "crates/mc-render",
+    "crates/mc-game",
+]
+default-members = ["crates/mc-game"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+mc-core = { path = "crates/mc-core" }
+mc-assets = { path = "crates/mc-assets" }
+mc-worldgen = { path = "crates/mc-worldgen" }
+mc-entity = { path = "crates/mc-entity" }
+mc-ui = { path = "crates/mc-ui" }
+mc-render = { path = "crates/mc-render" }
+
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "tga"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1.10"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+rustc-hash = "2"
+log = "0.4"
+env_logger = "0.11"
+fontdue = "0.9"
+rand = "0.9"
+
+# Debug builds are unplayably slow for a voxel game; optimise dependencies and
+# give our own crates a moderate level so `cargo run` stays usable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = 1

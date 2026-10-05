@@ -1,0 +1,13 @@
+[package]
+name = "mc-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mc-core.workspace = true
+mc-assets.workspace = true
+glam.workspace = true
+fontdue.workspace = true
+rustc-hash.workspace = true
+log.workspace = true

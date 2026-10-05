@@ -1,0 +1,14 @@
+[package]
+name = "mc-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mc-core.workspace = true
+glam.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustc-hash.workspace = true
+log.workspace = true
