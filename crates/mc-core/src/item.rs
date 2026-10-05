@@ -291,6 +291,14 @@ pub static ITEM_DEFS: &[ItemDef] = &[
         7.0,
     ),
     tool("shears", "Shears", "shears", T::Shears, 2, 238, 5.0, 1.0),
+    // Laid by chickens.
+    ItemDef {
+        name: "egg",
+        display: "Egg",
+        texture: "egg",
+        max_stack: 16,
+        kind: ItemKind::Material,
+    },
 ];
 
 impl ItemId {
