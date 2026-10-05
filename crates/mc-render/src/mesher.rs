@@ -88,6 +88,8 @@ pub struct MeshTables {
     pub isotropic: Vec<[bool; 6]>,
     /// Per biome: grass, foliage, water colours.
     pub biome_tints: Vec<[[u8; 3]; 3]>,
+    /// Greedy face merging (on unless `MC_GREEDY=0`, for benchmarking).
+    pub greedy: bool,
 }
 
 fn rgb(c: u32) -> [u8; 3] {
@@ -189,6 +191,7 @@ impl MeshTables {
                 .map(|i| bt.isotropic.get(i).copied().unwrap_or([false; 6]))
                 .collect(),
             biome_tints,
+            greedy: std::env::var("MC_GREEDY").map_or(true, |v| v != "0"),
         }
     }
 
@@ -709,7 +712,7 @@ impl Mesher<'_> {
             && blk.iter().all(|&a| a == blk[0])
             && tint4.iter().all(|&t| t == tint4[0]);
         // Swaying faces move per vertex, which a merged quad can't follow.
-        if !uniform || flags & FLAG_WAVE != 0 {
+        if !uniform || flags & FLAG_WAVE != 0 || !self.t.greedy {
             self.emit_box(
                 layer,
                 (x, y, z),

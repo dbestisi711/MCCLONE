@@ -199,7 +199,15 @@ pub fn build(name: &str, world: &mut World, origin: IVec3) -> Option<SceneView> 
                 c + IVec3::new(10, -4, 4),
                 blocks::STONE,
             );
-            for (x, z) in [(-8, -14), (8, -14), (0, -6), (-8, 2), (8, 2), (0, -22)] {
+            for (x, z) in [
+                (-8, -14),
+                (8, -14),
+                (0, -6),
+                (-8, 2),
+                (8, 2),
+                (0, -22),
+                (3, 2),
+            ] {
                 world.set_block(c + IVec3::new(x, -3, z), blocks::TORCH);
             }
             fill(
@@ -218,9 +226,9 @@ pub fn build(name: &str, world: &mut World, origin: IVec3) -> Option<SceneView> 
                 blocks::LAVA,
             );
             Some(SceneView {
-                eye: c.as_vec3() + Vec3::new(0.5, 1.6, 3.0),
+                eye: c.as_vec3() + Vec3::new(0.5, -1.4, 3.0),
                 yaw_deg: 0.0,
-                pitch_deg: -12.0,
+                pitch_deg: -6.0,
             })
         }
         "underwater" => {
@@ -288,7 +296,7 @@ pub fn decorate_frame(name: &str, world: &World, frame: &mut FrameData, origin: 
             transform: Mat4::from_translation(p) * Mat4::from_rotation_y(0.4 * i as f32),
             poses: vec![],
             tint: [1.0; 4],
-            hurt: if i == 1 { 1.0 } else { 0.0 },
+            hurt: 0.0,
             light: light(p + Vec3::Y),
         });
     }

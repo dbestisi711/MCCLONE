@@ -447,7 +447,6 @@ fn fs_crack(in: DynOut) -> @location(0) vec4<f32> {
 fn vs_dyn_hand(v: DynIn) -> DynOut {
     var o = dyn_vertex(v);
     o.clip.z = o.clip.w * 0.92 + o.clip.z * 0.08;
-    o.fog = vec3<f32>(0.0);
     return o;
 }
 

@@ -569,11 +569,13 @@ impl TexCache {
         if img.width == 0 || img.height == 0 {
             return;
         }
-        if let Some(t) = self.map.get(key) {
-            if t.width == img.width && t.height == img.height && !Arc::ptr_eq(t, &self.missing) {
-                write_rgba(queue, &t.texture, img);
-                return;
-            }
+        if let Some(t) = self.map.get(key)
+            && t.width == img.width
+            && t.height == img.height
+            && !Arc::ptr_eq(t, &self.missing)
+        {
+            write_rgba(queue, &t.texture, img);
+            return;
         }
         let t = Arc::new(make_tex(
             device,

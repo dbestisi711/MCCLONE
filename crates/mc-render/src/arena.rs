@@ -62,12 +62,12 @@ impl FreeList {
             len += next_len;
         }
         // Merge with the preceding block.
-        if let Some((&ps, &pl)) = self.free.range(..start).next_back() {
-            if ps + pl == start {
-                self.free.remove(&ps);
-                start = ps;
-                len += pl;
-            }
+        if let Some((&ps, &pl)) = self.free.range(..start).next_back()
+            && ps + pl == start
+        {
+            self.free.remove(&ps);
+            start = ps;
+            len += pl;
         }
         self.free.insert(start, len);
     }

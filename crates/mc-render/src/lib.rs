@@ -408,6 +408,15 @@ impl Renderer {
             blocks.levels,
             blocks.anims.len()
         );
+        for a in &blocks.anims {
+            log::debug!(
+                "animated tile {}: {} frames, {} ticks/frame (first frame layer {})",
+                a.layer,
+                a.frames.len(),
+                a.ticks_per_frame,
+                a.frames.first().copied().unwrap_or(0)
+            );
+        }
         let tex = TexCache::new(&device, &queue);
 
         let block_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -993,12 +1002,13 @@ impl Renderer {
 
         // Crack overlay.
         self.overlay_list.clear();
-        if let Some((pos, progress)) = frame.breaking {
-            if !self.blocks.destroy.is_empty() && !world.block(pos).is_air() {
-                let n = self.blocks.destroy.len();
-                let stage = ((progress.clamp(0.0, 0.999) * n as f32) as usize).min(n - 1);
-                dynamic::crack(&mut self.overlay_list, pos, self.blocks.destroy[stage], cam);
-            }
+        if let Some((pos, progress)) = frame.breaking
+            && !self.blocks.destroy.is_empty()
+            && !world.block(pos).is_air()
+        {
+            let n = self.blocks.destroy.len();
+            let stage = ((progress.clamp(0.0, 0.999) * n as f32) as usize).min(n - 1);
+            dynamic::crack(&mut self.overlay_list, pos, self.blocks.destroy[stage], cam);
         }
 
         // First-person hand / held item.

@@ -223,11 +223,11 @@ impl ChunkMeshes {
     }
 
     fn mark(&mut self, p: ChunkPos) {
-        if let Some(st) = self.chunks.get_mut(&p) {
-            if !st.check {
-                st.check = true;
-                self.to_check.push(p);
-            }
+        if let Some(st) = self.chunks.get_mut(&p)
+            && !st.check
+        {
+            st.check = true;
+            self.to_check.push(p);
         }
     }
 
@@ -301,10 +301,11 @@ impl ChunkMeshes {
                     let np = pos.offset(dx, dz);
                     let c = world.chunk(np);
                     meshable &= c.is_some();
-                    if let (Some(c), Some((cc, r))) = (c, self.frontier) {
-                        if !c.light_ready && np.chebyshev(cc) <= r {
-                            meshable = false;
-                        }
+                    if let (Some(c), Some((cc, r))) = (c, self.frontier)
+                        && !c.light_ready
+                        && np.chebyshev(cc) <= r
+                    {
+                        meshable = false;
                     }
                     cols[((dz + 1) * 3 + dx + 1) as usize] = c;
                 }
@@ -375,10 +376,10 @@ impl ChunkMeshes {
             );
             let rel = min + Vec3::splat(8.0) - cam;
             let mut d = rel.length_squared();
-            if let Some(f) = frustum {
-                if !f.aabb(min - cam, min - cam + Vec3::splat(16.0)) {
-                    d = d * 4.0 + 4096.0;
-                }
+            if let Some(f) = frustum
+                && !f.aabb(min - cam, min - cam + Vec3::splat(16.0))
+            {
+                d = d * 4.0 + 4096.0;
             }
             scored.push((d, p, sy));
         }

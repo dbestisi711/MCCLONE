@@ -16,7 +16,7 @@ pub struct SkyParams {
     pub glow: Vec3,
     pub glow_strength: f32,
     pub stars: f32,
-    /// Light levels subtracted from sky light (0 by day, 11 at night).
+    /// Light levels subtracted from sky light (0 by day, 10 at night).
     pub sky_dim: f32,
     /// Sky light colour (gamma space).
     pub sky_light: Vec3,
@@ -85,9 +85,9 @@ pub fn sky_params(sky: &SkyState, total_ticks: u64) -> SkyParams {
     let glow = Vec3::new(0.95, 0.22, 0.05).lerp(Vec3::new(1.0, 0.45, 0.15), warm);
 
     let stars = (1.0 - day * 2.2).clamp(0.0, 1.0) * (1.0 - rain);
-    let sky_dim = (1.0 - day) * 11.0;
+    let sky_dim = (1.0 - day) * 10.0;
     let sunset_tint = Vec3::new(1.0, 0.82, 0.68);
-    let night_tint = Vec3::new(0.62, 0.68, 0.95);
+    let night_tint = Vec3::new(0.7, 0.76, 1.0);
     let sky_light = night_tint
         .lerp(Vec3::ONE, smoothstep(0.0, 0.6, day))
         .lerp(sunset_tint, glow_strength * 0.5);
