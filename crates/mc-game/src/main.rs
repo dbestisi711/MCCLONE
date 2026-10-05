@@ -4,9 +4,12 @@
 //! Run:          cargo run --release
 //! Screenshot:   cargo run --release -- --screenshot out.png [--size 1280x720] [--seed N]
 //!               [--time 6000] [--yaw DEG] [--pitch DEG] [--pos X,Y,Z] [--ui inventory]
+//!               [--scene showcase|cave|underwater|entities] [--bench FRAMES]
+//! Keys:         + / - change the render distance.
 
 mod game;
 mod input_map;
+mod scenes;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,7 +61,8 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         let game = Game::new(self.options.clone());
-        let renderer = Renderer::new(window.clone(), game.assets.clone());
+        let mut renderer = Renderer::new(window.clone(), game.assets.clone());
+        renderer.set_render_distance(self.options.render_distance);
         log::info!("renderer: {}", renderer.adapter_info);
         self.window = Some(window);
         self.renderer = Some(renderer);
@@ -80,6 +84,11 @@ impl ApplicationHandler for App {
                     }
                 }
                 input_map::key_event(&mut game.input, &event);
+                if event.state == ElementState::Pressed {
+                    if let Some(d) = input_map::render_distance_delta(&event) {
+                        game.change_render_distance(d);
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(b) = input_map::mouse_button(button) {

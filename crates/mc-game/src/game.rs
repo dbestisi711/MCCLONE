@@ -40,6 +40,17 @@ pub struct Options {
     /// Ticks to simulate before taking a screenshot (lets mobs spawn/move).
     pub ticks: u32,
     pub survival: bool,
+    /// Screenshot mode: build a test scene (`showcase`, `cave`, `underwater`, `entities`).
+    pub scene: Option<String>,
+    /// Screenshot mode: render this many frames and report timings.
+    pub bench: u32,
+    /// Screenshot mode: stream the world in over this many simulated frames
+    /// while flying forward, instead of loading it all up front.
+    pub stream: u32,
+    /// Screenshot mode: item in hand (`none` for the bare arm).
+    pub held: Option<String>,
+    /// Start in third-person view.
+    pub third_person: bool,
 }
 
 impl Options {
@@ -56,6 +67,11 @@ impl Options {
             ui_screen: None,
             ticks: 0,
             survival: false,
+            scene: None,
+            bench: 0,
+            stream: 0,
+            held: None,
+            third_person: false,
         };
         let mut it = args.into_iter();
         while let Some(a) = it.next() {
@@ -84,6 +100,11 @@ impl Options {
                 "--ui" => o.ui_screen = Some(val()),
                 "--ticks" => o.ticks = val().parse().unwrap_or(0),
                 "--survival" => o.survival = true,
+                "--scene" => o.scene = Some(val()),
+                "--bench" => o.bench = val().parse().unwrap_or(60),
+                "--stream" => o.stream = val().parse().unwrap_or(300),
+                "--held" => o.held = Some(val()),
+                "--third-person" => o.third_person = true,
                 other => log::warn!("unknown argument {other}"),
             }
         }
@@ -110,6 +131,7 @@ pub struct Game {
     third_person: bool,
     fps: FpsCounter,
     paused: bool,
+    render_stats: mc_render::RenderStats,
 }
 
 impl Game {
@@ -170,9 +192,10 @@ impl Game {
             swing: 0.0,
             place_cooldown: 0,
             show_debug: false,
-            third_person: false,
+            third_person: options.third_person,
             fps: FpsCounter::default(),
             paused: false,
+            render_stats: Default::default(),
         }
     }
 
@@ -223,6 +246,16 @@ impl Game {
                 "Day time: {}  Entities: {}",
                 self.world.time_of_day,
                 self.entities.count()
+            ));
+            debug_lines.extend(self.render_stats.debug_lines());
+            let ss = &self.streamer.stats;
+            debug_lines.push(format!(
+                "Streaming: gen {} running, light {} running, {} unlit, gen {:.1} ms/chunk, light {:.1} ms/chunk",
+                ss.gen_in_flight,
+                ss.light_in_flight,
+                ss.unlit,
+                ss.gen_micros_total as f64 / ss.generated_total.max(1) as f64 / 1000.0,
+                ss.light_micros_total as f64 / ss.lit_total.max(1) as f64 / 1000.0,
             ));
         }
         HudInfo {
@@ -333,6 +366,7 @@ impl Game {
         self.swing = (self.swing - dt * 3.0).max(0.0);
 
         // 5. Streaming.
+        self.streamer.set_view_direction(self.player.look_dir());
         self.streamer
             .update(&mut self.world, ChunkPos::from_world(self.player.position));
 
@@ -363,6 +397,24 @@ impl Game {
             ..Default::default()
         };
         self.entities.fill_frame(partial, &mut frame);
+        if self.third_person {
+            // The player's own body (the camera sits 4 blocks behind it).
+            use mc_core::render_types::{BonePose, EntityRenderInstance, TextureKey};
+            let feet = self.player.interpolated_position(partial);
+            frame.entities.push(EntityRenderInstance {
+                model: "geometry.humanoid.custom".into(),
+                texture: TextureKey::new("textures/entity/steve"),
+                transform: glam::Mat4::from_translation(feet)
+                    * glam::Mat4::from_rotation_y(-self.player.yaw),
+                poses: vec![BonePose::rot(
+                    "head",
+                    Vec3::new(-self.player.pitch.to_degrees(), 0.0, 0.0),
+                )],
+                tint: [1.0; 4],
+                hurt: 0.0,
+                light: self.world.light((feet + Vec3::Y).floor().as_ivec3()),
+            });
+        }
         if let Some(t) = self.target {
             let p = t.block.as_vec3();
             frame.boxes.push(DebugBox {
@@ -385,7 +437,22 @@ impl Game {
         frame
     }
 
-    pub fn after_render(&mut self, _renderer: &mut Renderer) {}
+    pub fn after_render(&mut self, renderer: &mut Renderer) {
+        if renderer.render_distance != self.streamer.render_distance {
+            renderer.set_render_distance(self.streamer.render_distance);
+        }
+        self.render_stats = renderer.stats;
+    }
+
+    /// Change the render distance (keys + / -).
+    pub fn change_render_distance(&mut self, delta: i32) {
+        if self.ui.screen_open() {
+            return;
+        }
+        let rd = (self.streamer.render_distance + delta).clamp(2, 32);
+        self.streamer.set_render_distance(rd);
+        log::info!("render distance: {rd}");
+    }
 
     fn tick(&mut self, input: &InputState) {
         self.world.tick += 1;
@@ -731,22 +798,66 @@ impl FpsCounter {
 
 /// Headless mode: generate the world around the player, render one frame
 /// offscreen (works with a software Vulkan driver), and save it as PNG.
+/// With `--scene` a test structure is built first; with `--bench N` the
+/// frame is rendered N times per culling mode and timings are logged.
 pub fn run_screenshot(options: &Options, path: &str) {
+    if options.stream > 0 {
+        run_stream_test(options, path);
+        return;
+    }
     let mut game = Game::new(options.clone());
     let center = ChunkPos::from_world(game.player.position);
+    let t0 = std::time::Instant::now();
+    let (gen0, lit0) = (
+        game.streamer.stats.generated_total,
+        game.streamer.stats.lit_total,
+    );
     game.streamer
         .load_blocking(&mut game.world, center, options.render_distance);
+    let load_secs = t0.elapsed().as_secs_f64();
+    log::info!(
+        "world: {} chunks generated + {} lit in {:.2} s ({:.1} ms gen, {:.1} ms light per chunk on workers)",
+        game.streamer.stats.generated_total - gen0,
+        game.streamer.stats.lit_total - lit0,
+        load_secs,
+        game.streamer.stats.gen_micros_total as f64
+            / game.streamer.stats.generated_total.max(1) as f64
+            / 1000.0,
+        game.streamer.stats.light_micros_total as f64
+            / game.streamer.stats.lit_total.max(1) as f64
+            / 1000.0,
+    );
+    let p = game.player.position;
+    let ground = game
+        .world
+        .height(p.x.floor() as i32, p.z.floor() as i32)
+        .unwrap_or(64);
     if options.pos.is_none() {
         // Put the camera a little above the ground at spawn.
-        let p = game.player.position;
-        let h = game
-            .world
-            .height(p.x.floor() as i32, p.z.floor() as i32)
-            .unwrap_or(64);
-        game.player.position.y = h as f32 + 1.0;
+        game.player.position.y = ground as f32 + 1.0;
         game.player.prev_position = game.player.position;
     }
+    let scene_origin = glam::IVec3::new(p.x.floor() as i32, ground + 1, p.z.floor() as i32);
+    if let Some(name) = &options.scene {
+        match crate::scenes::build(name, &mut game.world, scene_origin) {
+            Some(view) => {
+                if options.pos.is_none() {
+                    game.player.position = view.eye - Vec3::Y * mc_entity::PLAYER_EYE_HEIGHT;
+                    game.player.prev_position = game.player.position;
+                }
+                if options.yaw.is_none() {
+                    game.player.yaw = view.yaw_deg.to_radians();
+                }
+                if options.pitch.is_none() {
+                    game.player.pitch = view.pitch_deg.to_radians();
+                }
+            }
+            None if name == "entities" => {}
+            None => log::warn!("unknown scene {name}"),
+        }
+    }
     let mut renderer = Renderer::new_offscreen(game.assets.clone(), options.size.0, options.size.1);
+    renderer.set_render_distance(options.render_distance);
     log::info!("offscreen renderer: {}", renderer.adapter_info);
     game.input.window_size = options.size;
     game.input.scale_factor = 1.0;
@@ -755,12 +866,150 @@ pub fn run_screenshot(options: &Options, path: &str) {
     for _ in 0..options.ticks {
         game.tick(&idle);
     }
-    // Let the streamer / mesher settle for a few frames.
+    // Apply scene edits to light, then mesh everything before the shot.
     let mut frame = game.frame(0.0);
-    for _ in 0..30 {
-        renderer.render(&game.world, &frame);
-        frame = game.frame(0.0);
+    let (sections, secs) = renderer.prepare_blocking(&game.world, &frame.camera);
+    log::info!(
+        "meshing: {} sections in {:.3} s = {:.0} sections/s ({:.0} us/section on workers)",
+        sections,
+        secs,
+        sections as f64 / secs.max(1e-9),
+        renderer.mesh_micros_avg()
+    );
+    if let Some(name) = &options.scene {
+        crate::scenes::decorate_frame(name, &game.world, &mut frame, scene_origin);
     }
+    if let Some(h) = &options.held {
+        frame.held_item = ItemId::by_name(h);
+    }
+    renderer.render(&game.world, &frame);
+    renderer.render(&game.world, &frame);
+    if options.bench > 0 {
+        for (label, frustum, occlusion) in [
+            ("frustum + cave culling", true, true),
+            ("frustum culling only", true, false),
+            ("no culling", false, false),
+        ] {
+            renderer.cull = mc_render::CullSettings { frustum, occlusion };
+            renderer.render(&game.world, &frame);
+            renderer.wait_gpu();
+            let mut cpu = 0.0;
+            let mut times = Vec::with_capacity(options.bench as usize);
+            for _ in 0..options.bench {
+                let t = std::time::Instant::now();
+                renderer.render(&game.world, &frame);
+                renderer.wait_gpu();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+                cpu += renderer.stats.cpu_ms as f64;
+            }
+            times.sort_by(f64::total_cmp);
+            let s = renderer.stats;
+            log::info!(
+                "bench [{label}]: median {:.2} ms, min {:.2} ms per frame (cpu {:.2} ms: cull {:.2}, encode {:.2}), {} sections drawn, {} draws, {:.0}k triangles",
+                times[times.len() / 2],
+                times[0],
+                cpu / options.bench as f64,
+                s.cull_ms,
+                s.encode_ms,
+                s.chunks_drawn,
+                s.draw_calls,
+                s.triangles as f64 / 1000.0
+            );
+        }
+        renderer.cull = mc_render::CullSettings {
+            frustum: true,
+            occlusion: true,
+        };
+    }
+    renderer.render(&game.world, &frame);
+    let img = renderer.capture().expect("capture");
+    save_png(path, &img);
+    log::info!("saved {path}");
+}
+
+/// `--stream N`: exercise the asynchronous paths (generation, lighting,
+/// meshing with upload budgets) the way the interactive game does: start
+/// with only the spawn area, fly forward for N simulated frames at 20 m/s
+/// (rendering every frame), then keep rendering until everything in range
+/// is meshed. Logs per-frame CPU spikes and load throughput.
+fn run_stream_test(options: &Options, path: &str) {
+    let mut game = Game::new(options.clone());
+    let mut renderer = Renderer::new_offscreen(game.assets.clone(), options.size.0, options.size.1);
+    renderer.set_render_distance(options.render_distance);
+    game.input.window_size = options.size;
+    game.input.scale_factor = 1.0;
+    let ground = game
+        .world
+        .height(
+            game.player.position.x.floor() as i32,
+            game.player.position.z.floor() as i32,
+        )
+        .unwrap_or(64);
+    game.player.position.y = ground as f32 + 12.0;
+    game.player.prev_position = game.player.position;
+    let start = std::time::Instant::now();
+    let mut update_ms: Vec<f64> = Vec::new();
+    let mut render_ms: Vec<f64> = Vec::new();
+    let dir = game.player.look_dir() * glam::Vec3::new(1.0, 0.0, 1.0);
+    let dir = dir.normalize_or_zero();
+    let mut frames = 0u32;
+    let mut settled_at = None;
+    loop {
+        if frames < options.stream {
+            // 1 block per frame (20 blocks/s at 20 fps).
+            game.player.position += dir;
+            game.player.prev_position = game.player.position;
+        }
+        let t = std::time::Instant::now();
+        let frame = game.frame(0.05);
+        let t1 = std::time::Instant::now();
+        renderer.render(&game.world, &frame);
+        renderer.wait_gpu();
+        update_ms.push((t1 - t).as_secs_f64() * 1000.0);
+        render_ms.push(renderer.stats.cpu_ms as f64);
+        frames += 1;
+        let s = renderer.stats;
+        let ss = game.streamer.stats;
+        let idle = s.mesh_queue == 0
+            && s.mesh_in_flight == 0
+            && ss.gen_in_flight == 0
+            && ss.light_in_flight == 0
+            && ss.waiting_insert == 0;
+        if frames >= options.stream && idle {
+            settled_at = Some(start.elapsed().as_secs_f64());
+            break;
+        }
+        if frames > options.stream + 2000 {
+            break;
+        }
+    }
+    let stats = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        (
+            v.iter().sum::<f64>() / v.len() as f64,
+            v[v.len() * 99 / 100],
+            *v.last().unwrap(),
+        )
+    };
+    let (ua, u99, umax) = stats(&mut update_ms);
+    let (ra, r99, rmax) = stats(&mut render_ms);
+    let ss = game.streamer.stats;
+    log::info!(
+        "stream: {} frames, settled after {:?} s; generated {} chunks ({:.1} ms each), lit {} ({:.1} ms each, {} discarded), meshed {} sections ({:.0} us each)",
+        frames,
+        settled_at.map(|t| (t * 100.0).round() / 100.0),
+        ss.generated_total,
+        ss.gen_micros_total as f64 / ss.generated_total.max(1) as f64 / 1000.0,
+        ss.lit_total,
+        ss.light_micros_total as f64 / ss.lit_total.max(1) as f64 / 1000.0,
+        ss.light_discarded,
+        renderer.stats.chunks_meshed,
+        renderer.mesh_micros_avg(),
+    );
+    log::info!(
+        "stream: game update+streaming ms avg {ua:.2} p99 {u99:.2} max {umax:.2}; render cpu ms avg {ra:.2} p99 {r99:.2} max {rmax:.2}"
+    );
+    let frame = game.frame(0.0);
     renderer.render(&game.world, &frame);
     let img = renderer.capture().expect("capture");
     save_png(path, &img);
