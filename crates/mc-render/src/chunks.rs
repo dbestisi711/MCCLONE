@@ -132,6 +132,10 @@ pub struct ChunkMeshes {
     pub max_in_flight: usize,
     /// Bytes uploaded per frame before the rest waits for the next frame.
     pub upload_budget: u64,
+    /// Camera chunk and render distance. A chunk waits for its neighbours'
+    /// light before its first mesh (avoids meshing twice), except for
+    /// neighbours beyond this radius, which will never be lit.
+    pub frontier: Option<(ChunkPos, i32)>,
     visit_stamp: Vec<u32>,
     stamp: u32,
     to_check: Vec<ChunkPos>,
@@ -169,8 +173,9 @@ impl ChunkMeshes {
             generation: 0,
             arena: Arena::new(max_buffer_size),
             stats: ChunkStats::default(),
-            max_in_flight: crate::tasks::pool().threads() * 3,
+            max_in_flight: crate::tasks::pool().threads() * 24,
             upload_budget: 6 << 20,
+            frontier: None,
             visit_stamp: Vec::new(),
             stamp: 0,
             to_check: Vec::new(),
@@ -293,8 +298,14 @@ impl ChunkMeshes {
             let mut meshable = chunk.light_ready;
             for dz in -1..=1 {
                 for dx in -1..=1 {
-                    let c = world.chunk(pos.offset(dx, dz));
+                    let np = pos.offset(dx, dz);
+                    let c = world.chunk(np);
                     meshable &= c.is_some();
+                    if let (Some(c), Some((cc, r))) = (c, self.frontier) {
+                        if !c.light_ready && np.chebyshev(cc) <= r {
+                            meshable = false;
+                        }
+                    }
                     cols[((dz + 1) * 3 + dx + 1) as usize] = c;
                 }
             }
@@ -346,7 +357,7 @@ impl ChunkMeshes {
             return;
         }
         let cap = if unlimited {
-            crate::tasks::pool().threads() * 8
+            crate::tasks::pool().threads() * 32
         } else {
             self.max_in_flight
         };

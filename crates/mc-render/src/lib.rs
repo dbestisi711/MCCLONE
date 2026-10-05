@@ -615,6 +615,10 @@ impl Renderer {
         let t0 = clock();
         let before = self.chunks.stats.sections_meshed_total;
         loop {
+            self.chunks.frontier = Some((
+                mc_core::ChunkPos::from_world(camera.position),
+                self.render_distance,
+            ));
             self.chunks.update(
                 world,
                 &self.device,
@@ -675,6 +679,7 @@ impl Renderer {
 
         // Chunk meshes.
         let t0 = clock();
+        self.chunks.frontier = Some((mc_core::ChunkPos::from_world(cam.position), rd));
         self.chunks.update(
             world,
             &self.device,

@@ -44,6 +44,9 @@ pub struct Options {
     pub scene: Option<String>,
     /// Screenshot mode: render this many frames and report timings.
     pub bench: u32,
+    /// Screenshot mode: stream the world in over this many simulated frames
+    /// while flying forward, instead of loading it all up front.
+    pub stream: u32,
 }
 
 impl Options {
@@ -62,6 +65,7 @@ impl Options {
             survival: false,
             scene: None,
             bench: 0,
+            stream: 0,
         };
         let mut it = args.into_iter();
         while let Some(a) = it.next() {
@@ -92,6 +96,7 @@ impl Options {
                 "--survival" => o.survival = true,
                 "--scene" => o.scene = Some(val()),
                 "--bench" => o.bench = val().parse().unwrap_or(60),
+                "--stream" => o.stream = val().parse().unwrap_or(300),
                 other => log::warn!("unknown argument {other}"),
             }
         }
@@ -770,6 +775,10 @@ impl FpsCounter {
 /// With `--scene` a test structure is built first; with `--bench N` the
 /// frame is rendered N times per culling mode and timings are logged.
 pub fn run_screenshot(options: &Options, path: &str) {
+    if options.stream > 0 {
+        run_stream_test(options, path);
+        return;
+    }
     let mut game = Game::new(options.clone());
     let center = ChunkPos::from_world(game.player.position);
     let t0 = std::time::Instant::now();
@@ -883,6 +892,95 @@ pub fn run_screenshot(options: &Options, path: &str) {
             occlusion: true,
         };
     }
+    renderer.render(&game.world, &frame);
+    let img = renderer.capture().expect("capture");
+    save_png(path, &img);
+    log::info!("saved {path}");
+}
+
+/// `--stream N`: exercise the asynchronous paths (generation, lighting,
+/// meshing with upload budgets) the way the interactive game does: start
+/// with only the spawn area, fly forward for N simulated frames at 20 m/s
+/// (rendering every frame), then keep rendering until everything in range
+/// is meshed. Logs per-frame CPU spikes and load throughput.
+fn run_stream_test(options: &Options, path: &str) {
+    let mut game = Game::new(options.clone());
+    let mut renderer = Renderer::new_offscreen(game.assets.clone(), options.size.0, options.size.1);
+    renderer.set_render_distance(options.render_distance);
+    game.input.window_size = options.size;
+    game.input.scale_factor = 1.0;
+    let ground = game
+        .world
+        .height(
+            game.player.position.x.floor() as i32,
+            game.player.position.z.floor() as i32,
+        )
+        .unwrap_or(64);
+    game.player.position.y = ground as f32 + 12.0;
+    game.player.prev_position = game.player.position;
+    let start = std::time::Instant::now();
+    let mut update_ms: Vec<f64> = Vec::new();
+    let mut render_ms: Vec<f64> = Vec::new();
+    let dir = game.player.look_dir() * glam::Vec3::new(1.0, 0.0, 1.0);
+    let dir = dir.normalize_or_zero();
+    let mut frames = 0u32;
+    let mut settled_at = None;
+    loop {
+        if frames < options.stream {
+            // 1 block per frame (20 blocks/s at 20 fps).
+            game.player.position += dir;
+            game.player.prev_position = game.player.position;
+        }
+        let t = std::time::Instant::now();
+        let frame = game.frame(0.05);
+        let t1 = std::time::Instant::now();
+        renderer.render(&game.world, &frame);
+        renderer.wait_gpu();
+        update_ms.push((t1 - t).as_secs_f64() * 1000.0);
+        render_ms.push(renderer.stats.cpu_ms as f64);
+        frames += 1;
+        let s = renderer.stats;
+        let ss = game.streamer.stats;
+        let idle = s.mesh_queue == 0
+            && s.mesh_in_flight == 0
+            && ss.gen_in_flight == 0
+            && ss.light_in_flight == 0
+            && ss.waiting_insert == 0;
+        if frames >= options.stream && idle {
+            settled_at = Some(start.elapsed().as_secs_f64());
+            break;
+        }
+        if frames > options.stream + 2000 {
+            break;
+        }
+    }
+    let stats = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        (
+            v.iter().sum::<f64>() / v.len() as f64,
+            v[v.len() * 99 / 100],
+            *v.last().unwrap(),
+        )
+    };
+    let (ua, u99, umax) = stats(&mut update_ms);
+    let (ra, r99, rmax) = stats(&mut render_ms);
+    let ss = game.streamer.stats;
+    log::info!(
+        "stream: {} frames, settled after {:?} s; generated {} chunks ({:.1} ms each), lit {} ({:.1} ms each, {} discarded), meshed {} sections ({:.0} us each)",
+        frames,
+        settled_at.map(|t| (t * 100.0).round() / 100.0),
+        ss.generated_total,
+        ss.gen_micros_total as f64 / ss.generated_total.max(1) as f64 / 1000.0,
+        ss.lit_total,
+        ss.light_micros_total as f64 / ss.lit_total.max(1) as f64 / 1000.0,
+        ss.light_discarded,
+        renderer.stats.chunks_meshed,
+        renderer.mesh_micros_avg(),
+    );
+    log::info!(
+        "stream: game update+streaming ms avg {ua:.2} p99 {u99:.2} max {umax:.2}; render cpu ms avg {ra:.2} p99 {r99:.2} max {rmax:.2}"
+    );
+    let frame = game.frame(0.0);
     renderer.render(&game.world, &frame);
     let img = renderer.capture().expect("capture");
     save_png(path, &img);

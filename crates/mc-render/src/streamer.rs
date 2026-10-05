@@ -207,7 +207,7 @@ impl ChunkStreamer {
         self.known_count = world.chunk_count();
 
         // 5. Light jobs.
-        let cap = tasks::pool().threads() * 2;
+        let cap = tasks::pool().threads() * 6;
         if self.light.in_flight() < cap && !self.unlit.is_empty() {
             let mut cands: Vec<ChunkPos> = self
                 .unlit
@@ -237,7 +237,7 @@ impl ChunkStreamer {
         }
 
         // 6. Generation jobs.
-        let cap = tasks::pool().threads() * 2;
+        let cap = tasks::pool().threads() * 4;
         if self.gen_jobs.in_flight() < cap {
             self.refresh_order(gen_r);
             for i in 0..self.order.len() {
