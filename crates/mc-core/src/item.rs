@@ -294,6 +294,14 @@ pub static ITEM_DEFS: &[ItemDef] = &[
     mat("wheat", "Wheat", "wheat"),
     mat("paper", "Paper", "paper"),
     mat("brick", "Brick", "brick"),
+    // Laid by chickens.
+    ItemDef {
+        name: "egg",
+        display: "Egg",
+        texture: "egg",
+        max_stack: 16,
+        kind: ItemKind::Material,
+    },
 ];
 
 impl ItemId {

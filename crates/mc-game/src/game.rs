@@ -392,6 +392,13 @@ impl Game {
         self.world.time_of_day = (self.world.time_of_day + 1) % DAY_LENGTH_TICKS;
         self.player.tick(input, &self.world);
         self.entities.tick(&mut self.world, &mut self.player);
+        for ev in self.entities.take_events() {
+            // No audio backend yet, so sounds are dropped here. Explosions
+            // have already edited the world (dirty blocks get remeshed).
+            if let mc_entity::EntityEvent::Explosion { pos, power } = ev {
+                log::debug!("explosion at {pos} (power {power})");
+            }
+        }
         if self.place_cooldown > 0 {
             self.place_cooldown -= 1;
         }
@@ -420,7 +427,9 @@ impl Game {
                     Some(ItemKind::Tool { damage, .. }) => damage,
                     _ => 1.0,
                 };
-                self.entities.attack(eye, dir, 3.0, dmg);
+                if self.entities.attack(eye, dir, 3.0, dmg) && !creative {
+                    self.player.exhaustion += 0.1;
+                }
                 self.breaking = None;
                 return;
             }
@@ -455,6 +464,19 @@ impl Game {
             self.breaking = None;
         }
 
+        // Use on an entity (e.g. shears on a sheep).
+        if self.input.mouse_pressed(MouseButton::Right) && entity_first {
+            let held = self.player.inventory.selected_item();
+            if self.entities.interact(eye, dir, 3.0, held) {
+                self.swing = 1.0;
+                self.place_cooldown = 4;
+                if !creative {
+                    self.wear_selected_tool();
+                }
+                return;
+            }
+        }
+
         // Use / place.
         let use_pressed = self.input.mouse_pressed(MouseButton::Right)
             || (self.input.mouse_held(MouseButton::Right) && self.place_cooldown == 0);
@@ -482,7 +504,9 @@ impl Game {
                     };
                     let existing = self.world.block(pos);
                     let bbox = mc_core::Aabb::block(pos);
-                    let blocked = block.def().solid && bbox.intersects(&self.player.aabb());
+                    let blocked = block.def().solid
+                        && (bbox.intersects(&self.player.aabb())
+                            || self.entities.any_mob_in(&bbox));
                     if existing.def().replaceable
                         && !blocked
                         && pos.y >= mc_core::WORLD_MIN_Y
@@ -491,6 +515,7 @@ impl Game {
                         let below = self.world.block(pos - IVec3::Y);
                         if !block.def().needs_support || below.def().solid {
                             self.world.set_block(pos, block);
+                            self.entities.on_block_changed(&self.world, pos);
                             self.swing = 1.0;
                             if !creative {
                                 self.player.inventory.consume_selected(1);
@@ -528,7 +553,19 @@ impl Game {
                 };
                 self.player.inventory.consume_selected(n);
                 self.entities
-                    .spawn_item(ItemStack { count: n, ..stack }, eye + dir * 0.6);
+                    .throw_item(ItemStack { count: n, ..stack }, eye, dir);
+            }
+        }
+    }
+
+    fn wear_selected_tool(&mut self) {
+        let inv = &mut self.player.inventory;
+        if let Some(stack) = inv.slots[inv.selected].as_mut() {
+            if let ItemKind::Tool { durability, .. } = stack.item.kind() {
+                stack.damage += 1;
+                if stack.damage >= durability {
+                    inv.slots[inv.selected] = None;
+                }
             }
         }
     }
@@ -541,6 +578,7 @@ impl Game {
                     .spawn_item(s, pos.as_vec3() + Vec3::splat(0.5));
             }
         }
+        self.entities.on_block_changed(&self.world, pos);
         // Unsupported plants/torches above pop off.
         let above = pos + IVec3::Y;
         let up = self.world.block(above);

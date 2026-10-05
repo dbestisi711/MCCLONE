@@ -7,6 +7,5 @@ license.workspace = true
 [dependencies]
 mc-core.workspace = true
 glam.workspace = true
-rand.workspace = true
 rustc-hash.workspace = true
 log.workspace = true
