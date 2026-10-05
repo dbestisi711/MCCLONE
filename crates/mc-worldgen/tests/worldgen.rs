@@ -249,7 +249,12 @@ fn world_has_expected_layers() {
 /// standing next to air at the same height, including across chunk borders.
 #[test]
 fn no_floating_fluids() {
-    for (seed, cx, cz) in [(12345u64, 70, 120), (1, 18, -45), (77, -5, -5)] {
+    for (seed, cx, cz) in [
+        (12345u64, 70, 120),
+        (12345, -12, 24),
+        (1, 18, -45),
+        (77, -5, -5),
+    ] {
         let g = WorldGenerator::new(seed);
         let n = 6;
         let mut chunks = std::collections::HashMap::new();

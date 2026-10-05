@@ -90,9 +90,10 @@ fn main() {
             }
         });
     } else {
-        let chunks = (size + 15) / 16;
         let cx0 = x0.div_euclid(16);
         let cz0 = z0.div_euclid(16);
+        // Enough chunks to cover the window even when it is not aligned.
+        let chunks = (x0 - cx0 * 16 + size + 15) / 16;
         let total = (chunks * chunks) as usize;
         let next = AtomicUsize::new(0);
         std::thread::scope(|s| {

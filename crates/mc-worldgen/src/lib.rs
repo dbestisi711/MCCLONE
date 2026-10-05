@@ -148,29 +148,47 @@ impl WorldGenerator {
 
     /// A safe place to spawn the player (feet position, on dry land).
     pub fn spawn_point(&self) -> IVec3 {
+        use mc_core::biome::biomes as b;
         let mut probe = Probe::new(self);
-        // Spiral outwards from the origin on a coarse grid.
+        let friendly = |id: BiomeId| {
+            matches!(
+                id,
+                b::PLAINS
+                    | b::SUNFLOWER_PLAINS
+                    | b::FOREST
+                    | b::BIRCH_FOREST
+                    | b::MEADOW
+                    | b::TAIGA
+                    | b::SAVANNA
+                    | b::CHERRY_GROVE
+                    | b::SNOWY_PLAINS
+                    | b::SNOWY_TAIGA
+            )
+        };
+        let dry = |id: BiomeId| {
+            !biomes::is_watery(id) && !matches!(id, b::BEACH | b::SNOWY_BEACH | b::STONY_SHORE)
+        };
+        // First look for a pleasant biome near the origin, then for any dry
+        // land, spiralling outwards on a coarse grid.
         let mut fallback = None;
-        for ring in 0..64 {
-            let r = ring * 8;
-            for i in -ring..=ring {
-                for (x, z) in [(i * 8, -r), (i * 8, r), (-r, i * 8), (r, i * 8)] {
-                    let c = probe.column(x, z);
-                    let ok_biome = !biomes::is_watery(c.biome)
-                        && !matches!(
-                            c.biome,
-                            mc_core::biome::biomes::BEACH
-                                | mc_core::biome::biomes::SNOWY_BEACH
-                                | mc_core::biome::biomes::STONY_SHORE
-                        );
-                    if c.top > SEA_LEVEL && c.top < 140 && c.slope < 0.6 && ok_biome {
-                        // Make sure the spot is not carved away and has room.
-                        if let Some(y) = self.spawn_height(x, z) {
-                            return IVec3::new(x, y, z);
+        for (rings, accept) in [
+            (64, &friendly as &dyn Fn(BiomeId) -> bool),
+            (128, &dry as &dyn Fn(BiomeId) -> bool),
+        ] {
+            for ring in 0..rings {
+                let r = ring * 8;
+                for i in -ring..=ring {
+                    for (x, z) in [(i * 8, -r), (i * 8, r), (-r, i * 8), (r, i * 8)] {
+                        let c = probe.column(x, z);
+                        if c.top > SEA_LEVEL && c.top < 140 && c.slope < 0.6 && accept(c.biome) {
+                            // Make sure the spot is not carved away and has room.
+                            if let Some(y) = self.spawn_height(x, z) {
+                                return IVec3::new(x, y, z);
+                            }
                         }
-                    }
-                    if fallback.is_none() && c.top > SEA_LEVEL {
-                        fallback = Some(IVec3::new(x, c.top + 1, z));
+                        if fallback.is_none() && c.top > SEA_LEVEL {
+                            fallback = Some(IVec3::new(x, c.top + 1, z));
+                        }
                     }
                 }
             }
@@ -447,10 +465,32 @@ impl<'a> ChunkGen<'a> {
         }
     }
 
-    /// Is (x, y, z) open water (above the terrain, at or below sea level)?
-    /// Pure function of the position, so every chunk agrees.
+    /// Is (x, y, z) open water (above the terrain, at or below sea level,
+    /// including swamp puddles)? Pure function of the position, so every
+    /// chunk agrees.
     pub fn open_water_at(&mut self, x: i32, y: i32, z: i32) -> bool {
-        y <= SEA_LEVEL && y > self.top_world(x, z)
+        y <= SEA_LEVEL && (y > self.top_world(x, z) || (y == SEA_LEVEL && self.puddle_at(x, z)))
+    }
+
+    /// Swamp puddle: a column of swampy lowland whose terrain top lies just
+    /// at or above sea level gets water at sea level instead (pure function).
+    pub fn puddle_at(&mut self, x: i32, z: i32) -> bool {
+        let top = self.top_world(x, z);
+        if !(SEA_LEVEL..=SEA_LEVEL + 1).contains(&top) {
+            return false;
+        }
+        // Enclosed by ground at sea level, so the water never borders air.
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if self.top_world(x + dx, z + dz) < SEA_LEVEL {
+                return false;
+            }
+        }
+        let p = self.params_world(x, z);
+        let biome = biomes::pick(&p.climate, &p.shape);
+        matches!(
+            biome,
+            mc_core::biome::biomes::SWAMP | mc_core::biome::biomes::MANGROVE_SWAMP
+        ) && self.g.surface.patch(x, z) > -0.15
     }
 
     /// Slope of the preliminary surface at any world column.
@@ -568,11 +608,27 @@ impl<'a> ChunkGen<'a> {
         let seed = g.seed;
         for lz in 0..16 {
             for lx in 0..16 {
-                let top = self.tops[(lz * 16 + lx) as usize];
-                for y in (top + 1)..=SEA_LEVEL {
-                    self.buf.set(lx, y, lz, blocks::WATER);
-                }
+                let ci = (lz * 16 + lx) as usize;
+                let top = self.tops[ci];
                 let (x, z) = (self.bx + lx, self.bz + lz);
+                // Open sky below sea level: plain water in oceans, rivers
+                // and lowland lakes. On higher land such spots are cave
+                // entrances, which take their fluid from the aquifer like
+                // the caves around them (so no free-standing water pillars).
+                let lowland = self.cols[ci].shape.height < (SEA_LEVEL + 3) as f32;
+                for y in (top + 1)..=SEA_LEVEL {
+                    let id = if lowland {
+                        blocks::WATER
+                    } else {
+                        match aq.fluid_at(x, y, z) {
+                            Fluid::Air => continue,
+                            Fluid::Water => blocks::WATER,
+                            Fluid::Lava => blocks::LAVA,
+                            Fluid::Barrier => stone_for(seed, x, y, z),
+                        }
+                    };
+                    self.buf.set(lx, y, lz, id);
+                }
                 let hi = top.min(max_top);
                 for y in (WORLD_MIN_Y..=hi).rev() {
                     if !self.buf.get(lx, y, lz).is_air() {
@@ -623,6 +679,13 @@ impl<'a> ChunkGen<'a> {
                     steep,
                 };
                 self.g.surface.apply(&mut self.buf, lx, lz, top, &ctx);
+                if self.puddle_at(ctx.x, ctx.z) {
+                    for y in SEA_LEVEL..=top {
+                        self.buf.set(lx, y, lz, blocks::AIR);
+                    }
+                    self.buf.set(lx, SEA_LEVEL, lz, blocks::WATER);
+                    self.buf.set(lx, SEA_LEVEL - 1, lz, blocks::MUD);
+                }
             }
         }
     }

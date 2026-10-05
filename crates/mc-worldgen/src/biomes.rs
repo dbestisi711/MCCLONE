@@ -38,7 +38,7 @@ pub fn humidity_band(h: f32) -> usize {
 }
 
 /// Continentalness below which the land is a mushroom island.
-const MUSHROOM_C: f32 = -1.1;
+const MUSHROOM_C: f32 = -1.07;
 
 pub fn pick(cl: &Climate, shape: &Shape) -> BiomeId {
     let h = shape.height;

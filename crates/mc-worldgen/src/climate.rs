@@ -210,7 +210,13 @@ fn inland_height(s: f32) -> Spline {
         // them rugged).
         .point(
             0.42,
-            pv_curve(63.5, 65.0, 68.0 + 2.0 * s, 80.0 + 6.0 * s, 92.0 + 8.0 * s),
+            pv_curve(
+                64.0,
+                67.0,
+                74.0 + 4.0 * s,
+                94.0 + 10.0 * s,
+                110.0 + 14.0 * s,
+            ),
             0.0,
         )
         // Flats and swamps.
@@ -229,7 +235,7 @@ fn inland_factor() -> Spline {
             0.42,
             Spline::smooth(
                 Coord::PeaksValleys,
-                &[(-1.0, 5.5), (0.0, 4.6), (0.4, 2.8), (1.0, 1.9)],
+                &[(-1.0, 5.5), (0.0, 4.2), (0.4, 2.3), (1.0, 1.6)],
             ),
             0.0,
         )
@@ -242,9 +248,10 @@ impl ClimateSampler {
         let f = |s: u64, freq: f64, amps: &[f64]| Fractal::new(salt(seed, s), freq, amps);
         let height = Spline::new(Coord::Continentalness)
             // Mushroom islands rise from the most remote ocean.
-            .point(-1.3, 67.0, 0.0)
-            .point(-1.15, 64.0, 0.0)
-            .point(-1.03, 40.0, 0.0)
+            .point(-1.24, 75.0, 0.0)
+            .point(-1.12, 69.0, 0.0)
+            .point(-1.04, 46.0, 0.0)
+            .point(-0.96, 38.0, 0.0)
             .point(-0.65, 35.0, 0.0)
             .point(-0.42, 45.0, 0.0)
             .point(-0.26, 50.0, 0.0)

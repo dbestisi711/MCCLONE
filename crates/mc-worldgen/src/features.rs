@@ -243,7 +243,11 @@ impl Features {
                         continue;
                     }
                     let mut trng = Rng::new(tree_seed);
-                    let top = cg.top_world(x, z);
+                    let mut top = cg.top_world(x, z);
+                    if cg.puddle_at(x, z) {
+                        // Swamp trees grow out of the puddle's floor.
+                        top = SEA_LEVEL - 1;
+                    }
                     let Some(kind) = choose(biome, &mut trng, top) else {
                         continue;
                     };
@@ -775,22 +779,23 @@ fn trunk_vines(w: &mut Writer, x: i32, y: i32, z: i32, h: i32) {
 }
 
 fn fancy_oak(w: &mut Writer, rng: &mut Rng, x: i32, y: i32, z: i32) {
-    let h = 9 + rng.below(6) as i32;
-    let trunk = (h as f32 * 0.72) as i32;
+    let h = 8 + rng.below(5) as i32;
     w.soil(x, y - 1, z);
     let (cx, cz) = (x as f32 + 0.5, z as f32 + 0.5);
-    w.blob(cx, (y + h - 2) as f32, cz, 2.8, 1.9, blocks::OAK_LEAVES);
+    w.blob(cx, (y + h - 1) as f32, cz, 3.2, 2.2, blocks::OAK_LEAVES);
     let branches = 3 + rng.below(3);
-    for _ in 0..branches {
-        let a = rng.f32() * TAU;
-        let len = 2.5 + rng.f32() * 2.0;
-        let sy = y as f32 + trunk as f32 * (0.5 + 0.4 * rng.f32());
+    let a0 = rng.f32() * TAU;
+    for i in 0..branches {
+        // Spread the branches around the trunk.
+        let a = a0 + i as f32 * TAU / branches as f32 + rng.f32() * 0.8;
+        let len = 2.5 + rng.f32() * 1.5;
+        let sy = y as f32 + h as f32 * (0.55 + 0.25 * rng.f32());
         let end = [
             cx + a.cos() * len,
             sy + 1.5 + rng.f32() * 1.5,
             cz + a.sin() * len,
         ];
-        w.blob(end[0], end[1] + 0.8, end[2], 2.4, 1.6, blocks::OAK_LEAVES);
+        w.blob(end[0], end[1] + 0.6, end[2], 2.8, 1.8, blocks::OAK_LEAVES);
         w.branch([cx, sy, cz], end, blocks::OAK_LOG);
     }
     for i in 0..h - 1 {

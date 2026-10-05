@@ -54,6 +54,9 @@ fn main() {
                 for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                     if get(x + dx, y, z + dz).is_air() {
                         walls += 1;
+                        if examples.is_empty() {
+                            examples.push((x, y, z));
+                        }
                         if (x + dx) >> 4 != x >> 4 || (z + dz) >> 4 != z >> 4 {
                             wall_border += 1;
                         }

@@ -51,6 +51,7 @@ pub struct TerrainNoise {
     tunnel_sheet: Fractal,
     tunnel_elevation: Fractal,
     tunnel_rarity: Fractal,
+    crag: Fractal,
 }
 
 impl TerrainNoise {
@@ -74,13 +75,26 @@ impl TerrainNoise {
             tunnel_sheet: f(13, 1.0 / 96.0, &[1.0, 0.4]),
             tunnel_elevation: f(14, 1.0 / 220.0, &[1.0, 0.5]),
             tunnel_rarity: f(15, 1.0 / 300.0, &[1.0]),
+            crag: f(16, 1.0 / 38.0, &[1.0, 0.45]),
         }
     }
 
     /// How far above the preliminary surface detail noise can still create
     /// solid blocks, for a given factor.
     pub fn max_overhang(&self, factor: f32) -> f32 {
-        self.detail_amp * 1.1 * 128.0 / factor.max(0.5) + 2.0
+        self.noise_amp(factor) * 1.1 * 128.0 / factor.max(0.5) + 2.0
+    }
+
+    /// Weight of the crag noise: only rugged (low-factor) terrain gets it.
+    #[inline]
+    fn crag_amp(factor: f32) -> f32 {
+        (3.6 - factor).max(0.0) * 0.8
+    }
+
+    /// Upper bound of the noise added to the terrain density.
+    #[inline]
+    fn noise_amp(&self, factor: f32) -> f32 {
+        self.detail_amp + Self::crag_amp(factor)
     }
 
     /// Terrain density without caves.
@@ -95,11 +109,18 @@ impl TerrainNoise {
         };
         // Detail noise only matters close to the surface; far above or
         // below the sign is already decided (the noise is bounded by 1).
-        if base > 2.4 || base < -self.detail_amp {
+        let amp = self.noise_amp(f);
+        if base > 2.4 + amp - self.detail_amp || base < -amp {
             return base;
         }
-        let n = self.detail.sample3(x as f64, y as f64 * 1.25, z as f64) as f32;
-        base + n * self.detail_amp
+        let (xf, yf, zf) = (x as f64, y as f64, z as f64);
+        let mut d = base + self.detail.sample3(xf, yf * 1.25, zf) as f32 * self.detail_amp;
+        let crag = Self::crag_amp(f);
+        if crag > 0.0 {
+            // Mid-frequency rock: cliffs, spires and overhangs.
+            d += self.crag.sample3(xf, yf * 0.9, zf) as f32 * crag;
+        }
+        d
     }
 
     /// Full density at a block position.
@@ -123,7 +144,9 @@ impl TerrainNoise {
         let depth = shape.height - yb;
 
         // Keep a roof over most caves; deeper under the sea floor.
-        let roof = if shape.height < 62.0 { 22.0 } else { 12.0 };
+        // Lowlands need a thicker roof: a breach there would let open
+        // water (filled without the aquifer) pour into a dry cave.
+        let roof = if shape.height < 70.0 { 24.0 } else { 12.0 };
         let guard = ((roof - depth) / 8.0).clamp(0.0, 1.0) * 2.5;
         let bottom = if yb < CAVE_FLOOR {
             (CAVE_FLOOR - yb) * 0.6
@@ -186,7 +209,8 @@ impl TerrainNoise {
         let mut out = caves + guard + bottom;
 
         // Entrances may break the surface on land.
-        if shape.height > 66.0 && depth < 70.0 && yb > 0.0 {
+        // (Well above the 66-block lowland line, see ChunkGen::fluids.)
+        if shape.height > 72.0 && depth < 70.0 && yb > 0.0 {
             let mask = self.entrance_mask.sample2(xf, zf) as f32;
             if mask > 0.2 {
                 let a = self.entrance_a.sample3(xf, yf * 0.6, zf) as f32;

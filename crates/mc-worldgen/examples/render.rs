@@ -67,8 +67,19 @@ fn classify(id: BlockId) -> Hit {
         Shape::Cube | Shape::Inset => Hit::Solid,
         Shape::Layer(_) => Hit::Solid,
         Shape::Liquid => Hit::Solid,
+        // Flowers and grass are thin crosses: only flowers are drawn (as a
+        // full block) so meadows show colour; short grass/ferns are skipped.
+        Shape::Cross => {
+            if d.tint == mc_core::block::Tint::None
+                && id != blocks::DEAD_BUSH
+                && id != blocks::SUGAR_CANE
+            {
+                Hit::Solid
+            } else {
+                Hit::Pass
+            }
+        }
         _ => {
-            // Plants: thin, render as solid only sometimes (gives texture).
             if d.layer == Layer::Cutout {
                 Hit::Solid
             } else {
@@ -205,6 +216,20 @@ fn main() {
             .collect(),
     };
     println!("generated {} chunks in {:.2?}", n * n, t0.elapsed());
+    if let Some((px, pz)) =
+        a.0.iter()
+            .position(|s| s == "--peek")
+            .map(|_| (a.get("px", 0i32), a.get("pz", 0i32)))
+    {
+        let mut y = WORLD_MAX_Y - 1;
+        while y > WORLD_MIN_Y && world.get(px, y, pz).is_none_or(|b| b.is_air()) {
+            y -= 1;
+        }
+        println!(
+            "peek {px} {pz}: top {y} {:?}",
+            world.get(px, y, pz).map(|b| b.def().name)
+        );
+    }
 
     // Camera basis. Yaw 0 looks to -Z, +90° to +X.
     let fwd = [
@@ -224,6 +249,14 @@ fn main() {
         [v[0] / l, v[1] / l, v[2] / l]
     };
     let max_t = (radius * 16) as f32;
+    if let Some(h) = cast(&world, cam, fwd, max_t, false) {
+        println!(
+            "centre ray hits {:?} {} at t={:.0}",
+            h.pos,
+            h.id.def().name,
+            h.t
+        );
+    }
     let sky = [150u8, 190, 245];
     let tan = (fov * 0.5).tan();
     let aspect = width as f32 / height as f32;

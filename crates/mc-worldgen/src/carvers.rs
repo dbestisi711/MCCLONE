@@ -353,7 +353,7 @@ impl Carvers {
         };
         // Never open a dry hole under or beside open water (lakes, rivers,
         // the sea floor): the water would hang in the air.
-        if new != blocks::WATER && y < SEA_LEVEL {
+        if new != blocks::WATER && y <= SEA_LEVEL {
             let cg = &mut *t.cg;
             if cg.open_water_at(x, y + 1, z)
                 || cg.open_water_at(x + 1, y, z)

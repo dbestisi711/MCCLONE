@@ -17,6 +17,19 @@ fn main() {
     let range: i32 = a.get("range", 6000);
     let step: i32 = a.get("step", 32);
     let g = WorldGenerator::new(seed);
+    if a.flag("spawn") {
+        let t = std::time::Instant::now();
+        let s = g.spawn_point();
+        println!(
+            "spawn {} {} {} biome {} ({:.1?})",
+            s.x,
+            s.y,
+            s.z,
+            g.biome_at(s.x, s.z).def().name,
+            t.elapsed()
+        );
+        return;
+    }
     if a.flag("probe") {
         let p = g.column_params(cx, cz);
         let info = g.probe(cx, cz);
