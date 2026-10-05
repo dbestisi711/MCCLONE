@@ -387,6 +387,10 @@ struct DynOut {
 
 @vertex
 fn vs_dyn(v: DynIn) -> DynOut {
+    return dyn_vertex(v);
+}
+
+fn dyn_vertex(v: DynIn) -> DynOut {
     let l = world_light(v.light.x * 15.0, v.light.y * 15.0) * v.light.z;
     var o: DynOut;
     o.clip = g.view_proj * vec4<f32>(v.pos, 1.0);
@@ -435,6 +439,16 @@ fn fs_crack(in: DynOut) -> @location(0) vec4<f32> {
         discard;
     }
     return vec4<f32>(mix(vec3<f32>(1.0), t.rgb, t.a), 1.0);
+}
+
+// First-person hand / held item: like `vs_dyn`, but depth is squeezed
+// next to the near plane so it is never hidden inside walls.
+@vertex
+fn vs_dyn_hand(v: DynIn) -> DynOut {
+    var o = dyn_vertex(v);
+    o.clip.z = o.clip.w * 0.92 + o.clip.z * 0.08;
+    o.fog = vec3<f32>(0.0);
+    return o;
 }
 
 // Sun and moon: additive, unlit.

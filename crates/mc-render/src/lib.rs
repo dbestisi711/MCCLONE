@@ -184,6 +184,8 @@ struct Pipelines {
     line: wgpu::RenderPipeline,
     ui_tex: wgpu::RenderPipeline,
     ui_block: wgpu::RenderPipeline,
+    hand_tex: wgpu::RenderPipeline,
+    hand_block: wgpu::RenderPipeline,
 }
 
 /// A buffer that grows (power of two) when written with more data.
@@ -265,6 +267,9 @@ pub struct Renderer {
     sky_list: DynList,
     world_list: DynList,
     overlay_list: DynList,
+    hand_list: DynList,
+    /// Right arm of the player model, for the empty first-person hand.
+    arm: Option<mc_assets::EntityModel>,
     lines: Vec<LineVertex>,
     ui_verts: Vec<UiVertex>,
     ui_batches: Vec<UiBatch>,
@@ -494,6 +499,7 @@ impl Renderer {
         let quad_index_quads = 1 << 16;
         let quad_index = make_quad_index(&device, &queue, quad_index_quads);
         let v = wgpu::BufferUsages::VERTEX;
+        let arm = dynamic::arm_model(&assets.models);
         let clouds = CloudMap::new(
             assets
                 .pack
@@ -542,6 +548,8 @@ impl Renderer {
             sky_list: DynList::default(),
             world_list: DynList::default(),
             overlay_list: DynList::default(),
+            hand_list: DynList::default(),
+            arm,
             lines: Vec::new(),
             ui_verts: Vec::new(),
             ui_batches: Vec::new(),
@@ -993,6 +1001,34 @@ impl Renderer {
             }
         }
 
+        // First-person hand / held item.
+        self.hand_list.clear();
+        if !frame.third_person {
+            let light = world.light(frame.camera.position.floor().as_ivec3());
+            let arm_tex = self
+                .arm
+                .as_ref()
+                .map(|_| self.tex.get(device, queue, assets, "textures/entity/steve"));
+            let icon = frame.held_item.filter(|i| i.block().is_none()).map(|i| {
+                DynKind::Tex(
+                    self.tex
+                        .item_icon(device, queue, assets, i)
+                        .unwrap_or_else(|| self.tex.missing.clone()),
+                )
+            });
+            dynamic::first_person(
+                &mut self.hand_list,
+                &tables,
+                &self.opaque_tiles,
+                &frame.camera,
+                frame.held_item,
+                frame.swing,
+                light,
+                self.arm.as_ref().zip(arm_tex.map(DynKind::Tex)),
+                icon,
+            );
+        }
+
         // Outlines.
         self.lines.clear();
         for b in &frame.boxes {
@@ -1017,6 +1053,7 @@ impl Renderer {
         all.extend_from_slice(&self.sky_list.verts);
         all.extend_from_slice(&self.world_list.verts);
         all.extend_from_slice(&self.overlay_list.verts);
+        all.extend_from_slice(&self.hand_list.verts);
         self.dyn_buf
             .write(device, queue, bytemuck::cast_slice(&all));
         self.line_buf
@@ -1075,7 +1112,8 @@ impl Renderer {
 
         let sky_n = self.sky_list.verts.len() as u32;
         let world_n = self.world_list.verts.len() as u32;
-        let dyn_bases = [0, sky_n, sky_n + world_n];
+        let overlay_n = self.overlay_list.verts.len() as u32;
+        let dyn_bases = [0, sky_n, sky_n + world_n, sky_n + world_n + overlay_n];
         let sky_visible = self.chunks.stats.sky_visible;
 
         // Chunks: opaque and cutout front to back.
@@ -1189,6 +1227,25 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.line_buf.buf.slice(..));
             pass.draw(0..self.lines.len() as u32, 0..1);
             draws += 1;
+        }
+
+        // First-person hand / held item (on top of the world).
+        if !self.hand_list.batches.is_empty() {
+            pass.set_vertex_buffer(0, self.dyn_buf.buf.slice(..));
+            for b in &self.hand_list.batches {
+                match &b.kind {
+                    DynKind::Tex(t) => {
+                        pass.set_pipeline(&self.pipes.hand_tex);
+                        pass.set_bind_group(1, &t.bind_group, &[]);
+                    }
+                    _ => pass.set_pipeline(&self.pipes.hand_block),
+                }
+                pass.draw(
+                    dyn_bases[3] + b.start..dyn_bases[3] + b.start + b.count,
+                    0..1,
+                );
+                draws += 1;
+            }
         }
 
         // UI.
@@ -1571,6 +1628,21 @@ fn create_pipelines(
             depth_compare: C::Always,
             blend: alpha,
             ..base("ui blocks", &l0, "vs_ui", "fs_ui_block", &ui_buffers)
+        }),
+        hand_tex: make(PipeDesc {
+            depth_write: true,
+            ..base("hand", &l01, "vs_dyn_hand", "fs_dyn_tex", &dyn_buffers)
+        }),
+        hand_block: make(PipeDesc {
+            cull: Some(wgpu::Face::Back),
+            depth_write: true,
+            ..base(
+                "held block",
+                &l0,
+                "vs_dyn_hand",
+                "fs_dyn_block",
+                &dyn_buffers,
+            )
         }),
     }
 }

@@ -47,6 +47,10 @@ pub struct Options {
     /// Screenshot mode: stream the world in over this many simulated frames
     /// while flying forward, instead of loading it all up front.
     pub stream: u32,
+    /// Screenshot mode: item in hand (`none` for the bare arm).
+    pub held: Option<String>,
+    /// Start in third-person view.
+    pub third_person: bool,
 }
 
 impl Options {
@@ -66,6 +70,8 @@ impl Options {
             scene: None,
             bench: 0,
             stream: 0,
+            held: None,
+            third_person: false,
         };
         let mut it = args.into_iter();
         while let Some(a) = it.next() {
@@ -97,6 +103,8 @@ impl Options {
                 "--scene" => o.scene = Some(val()),
                 "--bench" => o.bench = val().parse().unwrap_or(60),
                 "--stream" => o.stream = val().parse().unwrap_or(300),
+                "--held" => o.held = Some(val()),
+                "--third-person" => o.third_person = true,
                 other => log::warn!("unknown argument {other}"),
             }
         }
@@ -184,7 +192,7 @@ impl Game {
             swing: 0.0,
             place_cooldown: 0,
             show_debug: false,
-            third_person: false,
+            third_person: options.third_person,
             fps: FpsCounter::default(),
             paused: false,
             render_stats: Default::default(),
@@ -389,6 +397,24 @@ impl Game {
             ..Default::default()
         };
         self.entities.fill_frame(partial, &mut frame);
+        if self.third_person {
+            // The player's own body (the camera sits 4 blocks behind it).
+            use mc_core::render_types::{BonePose, EntityRenderInstance, TextureKey};
+            let feet = self.player.interpolated_position(partial);
+            frame.entities.push(EntityRenderInstance {
+                model: "geometry.humanoid.custom".into(),
+                texture: TextureKey::new("textures/entity/steve"),
+                transform: glam::Mat4::from_translation(feet)
+                    * glam::Mat4::from_rotation_y(-self.player.yaw),
+                poses: vec![BonePose::rot(
+                    "head",
+                    Vec3::new(-self.player.pitch.to_degrees(), 0.0, 0.0),
+                )],
+                tint: [1.0; 4],
+                hurt: 0.0,
+                light: self.world.light((feet + Vec3::Y).floor().as_ivec3()),
+            });
+        }
         if let Some(t) = self.target {
             let p = t.block.as_vec3();
             frame.boxes.push(DebugBox {
@@ -852,6 +878,9 @@ pub fn run_screenshot(options: &Options, path: &str) {
     );
     if let Some(name) = &options.scene {
         crate::scenes::decorate_frame(name, &game.world, &mut frame, scene_origin);
+    }
+    if let Some(h) = &options.held {
+        frame.held_item = ItemId::by_name(h);
     }
     renderer.render(&game.world, &frame);
     renderer.render(&game.world, &frame);

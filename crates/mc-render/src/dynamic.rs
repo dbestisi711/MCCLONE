@@ -457,6 +457,104 @@ pub fn box_lines(out: &mut Vec<LineVertex>, b: &DebugBox, cam: Vec3) {
     }
 }
 
+/// The player's right arm (and sleeve) from the humanoid model, re-rooted
+/// so it can be drawn alone in first person.
+pub fn arm_model(models: &mc_assets::EntityModels) -> Option<mc_assets::EntityModel> {
+    let src = models.get("geometry.humanoid.custom")?;
+    let arm = src.bone_index("rightArm")?;
+    let mut bones = Vec::new();
+    let mut b = src.bones[arm].clone();
+    b.parent = None;
+    bones.push(b);
+    if let Some(sleeve) = src.bone_index("rightSleeve") {
+        let mut s = src.bones[sleeve].clone();
+        s.parent = Some(0);
+        bones.push(s);
+    }
+    Some(mc_assets::EntityModel {
+        bones,
+        ..(**src).clone()
+    })
+}
+
+/// First-person hand / held item, in camera-relative world space.
+#[allow(clippy::too_many_arguments)]
+pub fn first_person(
+    list: &mut DynList,
+    tables: &MeshTables,
+    opaque_tiles: &[bool],
+    cam: &mc_core::render_types::Camera,
+    held: Option<mc_core::ItemId>,
+    swing: f32,
+    light: u8,
+    arm: Option<(&mc_assets::EntityModel, DynKind)>,
+    icon: Option<DynKind>,
+) {
+    use std::f32::consts::PI;
+    let fwd = cam.forward();
+    let right = Vec3::new(cam.yaw.cos(), 0.0, cam.yaw.sin());
+    let up = right.cross(fwd).normalize_or_zero();
+    let view_to_rel = Mat4::from_cols(
+        right.extend(0.0),
+        up.extend(0.0),
+        (-fwd).extend(0.0),
+        glam::Vec4::W,
+    );
+    // Swing: forward jab with a little arc.
+    let s = (swing.clamp(0.0, 1.0) * PI).sin();
+    let s2 = (swing.clamp(0.0, 1.0).sqrt() * PI).sin();
+    let swing_m = Mat4::from_translation(Vec3::new(
+        -0.25 * s2,
+        0.12 * (s2 * 2.0 * PI).sin().abs() * 0.5,
+        -0.2 * s,
+    )) * Mat4::from_rotation_y(0.35 * s2)
+        * Mat4::from_rotation_x(-0.5 * s);
+    match held {
+        Some(item) => {
+            if let Some(b) = item.block() {
+                let m = view_to_rel
+                    * swing_m
+                    * Mat4::from_translation(Vec3::new(0.66, -0.56, -1.12))
+                    * Mat4::from_rotation_x(0.2)
+                    * Mat4::from_rotation_y(0.75)
+                    * Mat4::from_scale(Vec3::splat(0.28));
+                block_model(
+                    list,
+                    tables,
+                    opaque_tiles,
+                    b,
+                    m,
+                    Vec3::ZERO,
+                    light,
+                    &DynKind::Block,
+                );
+            } else if let Some(kind) = icon {
+                let m = view_to_rel
+                    * swing_m
+                    * Mat4::from_translation(Vec3::new(0.64, -0.44, -1.05))
+                    * Mat4::from_rotation_y(-0.9)
+                    * Mat4::from_rotation_z(0.2)
+                    * Mat4::from_scale(Vec3::splat(0.45));
+                icon_quad(list, &kind, m, Vec3::ZERO, light);
+            }
+        }
+        None => {
+            let Some((model, kind)) = arm else { return };
+            let mesh = model.mesh(&[]);
+            // Shoulder pivot in blocks; point the arm forward and inward.
+            let pivot = model.bones[0].pivot / 16.0;
+            let m = view_to_rel
+                * swing_m
+                * Mat4::from_translation(Vec3::new(0.74, -0.8, -0.5))
+                * Mat4::from_rotation_y(0.28)
+                * Mat4::from_rotation_x(1.85)
+                * Mat4::from_rotation_z(-0.1)
+                * Mat4::from_translation(-pivot);
+            entity_mesh(list, &kind, &mesh, m, Vec3::ZERO, [1.0; 4], light, 0.0);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ clouds
 
 pub const CLOUD_CELL: f32 = 12.0;
