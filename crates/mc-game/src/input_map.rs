@@ -67,3 +67,12 @@ pub fn mouse_button(b: winit::event::MouseButton) -> Option<MouseButton> {
         _ => None,
     }
 }
+
+/// `+` / `-` (main row or keypad) change the render distance.
+pub fn render_distance_delta(e: &KeyEvent) -> Option<i32> {
+    match e.physical_key {
+        PhysicalKey::Code(KeyCode::Equal | KeyCode::NumpadAdd) => Some(1),
+        PhysicalKey::Code(KeyCode::Minus | KeyCode::NumpadSubtract) => Some(-1),
+        _ => None,
+    }
+}

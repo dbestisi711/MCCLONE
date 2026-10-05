@@ -40,6 +40,10 @@ pub struct Options {
     /// Ticks to simulate before taking a screenshot (lets mobs spawn/move).
     pub ticks: u32,
     pub survival: bool,
+    /// Screenshot mode: build a test scene (`showcase`, `cave`, `underwater`, `entities`).
+    pub scene: Option<String>,
+    /// Screenshot mode: render this many frames and report timings.
+    pub bench: u32,
 }
 
 impl Options {
@@ -56,6 +60,8 @@ impl Options {
             ui_screen: None,
             ticks: 0,
             survival: false,
+            scene: None,
+            bench: 0,
         };
         let mut it = args.into_iter();
         while let Some(a) = it.next() {
@@ -84,6 +90,8 @@ impl Options {
                 "--ui" => o.ui_screen = Some(val()),
                 "--ticks" => o.ticks = val().parse().unwrap_or(0),
                 "--survival" => o.survival = true,
+                "--scene" => o.scene = Some(val()),
+                "--bench" => o.bench = val().parse().unwrap_or(60),
                 other => log::warn!("unknown argument {other}"),
             }
         }
@@ -110,6 +118,7 @@ pub struct Game {
     third_person: bool,
     fps: FpsCounter,
     paused: bool,
+    render_stats: mc_render::RenderStats,
 }
 
 impl Game {
@@ -170,6 +179,7 @@ impl Game {
             third_person: false,
             fps: FpsCounter::default(),
             paused: false,
+            render_stats: Default::default(),
         }
     }
 
@@ -220,6 +230,16 @@ impl Game {
                 "Day time: {}  Entities: {}",
                 self.world.time_of_day,
                 self.entities.count()
+            ));
+            debug_lines.extend(self.render_stats.debug_lines());
+            let ss = &self.streamer.stats;
+            debug_lines.push(format!(
+                "Streaming: gen {} running, light {} running, {} unlit, gen {:.1} ms/chunk, light {:.1} ms/chunk",
+                ss.gen_in_flight,
+                ss.light_in_flight,
+                ss.unlit,
+                ss.gen_micros_total as f64 / ss.generated_total.max(1) as f64 / 1000.0,
+                ss.light_micros_total as f64 / ss.lit_total.max(1) as f64 / 1000.0,
             ));
         }
         HudInfo {
@@ -329,6 +349,7 @@ impl Game {
         self.swing = (self.swing - dt * 3.0).max(0.0);
 
         // 5. Streaming.
+        self.streamer.set_view_direction(self.player.look_dir());
         self.streamer
             .update(&mut self.world, ChunkPos::from_world(self.player.position));
 
@@ -380,7 +401,22 @@ impl Game {
         frame
     }
 
-    pub fn after_render(&mut self, _renderer: &mut Renderer) {}
+    pub fn after_render(&mut self, renderer: &mut Renderer) {
+        if renderer.render_distance != self.streamer.render_distance {
+            renderer.set_render_distance(self.streamer.render_distance);
+        }
+        self.render_stats = renderer.stats;
+    }
+
+    /// Change the render distance (keys + / -).
+    pub fn change_render_distance(&mut self, delta: i32) {
+        if self.ui.screen_open() {
+            return;
+        }
+        let rd = (self.streamer.render_distance + delta).clamp(2, 32);
+        self.streamer.set_render_distance(rd);
+        log::info!("render distance: {rd}");
+    }
 
     fn tick(&mut self, input: &InputState) {
         self.world.tick += 1;
@@ -678,22 +714,62 @@ impl FpsCounter {
 
 /// Headless mode: generate the world around the player, render one frame
 /// offscreen (works with a software Vulkan driver), and save it as PNG.
+/// With `--scene` a test structure is built first; with `--bench N` the
+/// frame is rendered N times per culling mode and timings are logged.
 pub fn run_screenshot(options: &Options, path: &str) {
     let mut game = Game::new(options.clone());
     let center = ChunkPos::from_world(game.player.position);
+    let t0 = std::time::Instant::now();
+    let (gen0, lit0) = (
+        game.streamer.stats.generated_total,
+        game.streamer.stats.lit_total,
+    );
     game.streamer
         .load_blocking(&mut game.world, center, options.render_distance);
+    let load_secs = t0.elapsed().as_secs_f64();
+    log::info!(
+        "world: {} chunks generated + {} lit in {:.2} s ({:.1} ms gen, {:.1} ms light per chunk on workers)",
+        game.streamer.stats.generated_total - gen0,
+        game.streamer.stats.lit_total - lit0,
+        load_secs,
+        game.streamer.stats.gen_micros_total as f64
+            / game.streamer.stats.generated_total.max(1) as f64
+            / 1000.0,
+        game.streamer.stats.light_micros_total as f64
+            / game.streamer.stats.lit_total.max(1) as f64
+            / 1000.0,
+    );
+    let p = game.player.position;
+    let ground = game
+        .world
+        .height(p.x.floor() as i32, p.z.floor() as i32)
+        .unwrap_or(64);
     if options.pos.is_none() {
         // Put the camera a little above the ground at spawn.
-        let p = game.player.position;
-        let h = game
-            .world
-            .height(p.x.floor() as i32, p.z.floor() as i32)
-            .unwrap_or(64);
-        game.player.position.y = h as f32 + 1.0;
+        game.player.position.y = ground as f32 + 1.0;
         game.player.prev_position = game.player.position;
     }
+    let scene_origin = glam::IVec3::new(p.x.floor() as i32, ground + 1, p.z.floor() as i32);
+    if let Some(name) = &options.scene {
+        match crate::scenes::build(name, &mut game.world, scene_origin) {
+            Some(view) => {
+                if options.pos.is_none() {
+                    game.player.position = view.eye - Vec3::Y * mc_entity::PLAYER_EYE_HEIGHT;
+                    game.player.prev_position = game.player.position;
+                }
+                if options.yaw.is_none() {
+                    game.player.yaw = view.yaw_deg.to_radians();
+                }
+                if options.pitch.is_none() {
+                    game.player.pitch = view.pitch_deg.to_radians();
+                }
+            }
+            None if name == "entities" => {}
+            None => log::warn!("unknown scene {name}"),
+        }
+    }
     let mut renderer = Renderer::new_offscreen(game.assets.clone(), options.size.0, options.size.1);
+    renderer.set_render_distance(options.render_distance);
     log::info!("offscreen renderer: {}", renderer.adapter_info);
     game.input.window_size = options.size;
     game.input.scale_factor = 1.0;
@@ -702,11 +778,54 @@ pub fn run_screenshot(options: &Options, path: &str) {
     for _ in 0..options.ticks {
         game.tick(&idle);
     }
-    // Let the streamer / mesher settle for a few frames.
+    // Apply scene edits to light, then mesh everything before the shot.
     let mut frame = game.frame(0.0);
-    for _ in 0..30 {
-        renderer.render(&game.world, &frame);
-        frame = game.frame(0.0);
+    let (sections, secs) = renderer.prepare_blocking(&game.world, &frame.camera);
+    log::info!(
+        "meshing: {} sections in {:.3} s = {:.0} sections/s ({:.0} us/section on workers)",
+        sections,
+        secs,
+        sections as f64 / secs.max(1e-9),
+        renderer.mesh_micros_avg()
+    );
+    if let Some(name) = &options.scene {
+        crate::scenes::decorate_frame(name, &game.world, &mut frame, scene_origin);
+    }
+    renderer.render(&game.world, &frame);
+    renderer.render(&game.world, &frame);
+    if options.bench > 0 {
+        for (label, frustum, occlusion) in [
+            ("frustum + cave culling", true, true),
+            ("frustum culling only", true, false),
+            ("no culling", false, false),
+        ] {
+            renderer.cull = mc_render::CullSettings { frustum, occlusion };
+            renderer.render(&game.world, &frame);
+            renderer.wait_gpu();
+            let t = std::time::Instant::now();
+            let mut cpu = 0.0;
+            for _ in 0..options.bench {
+                renderer.render(&game.world, &frame);
+                renderer.wait_gpu();
+                cpu += renderer.stats.cpu_ms as f64;
+            }
+            let wall = t.elapsed().as_secs_f64() * 1000.0 / options.bench as f64;
+            let s = renderer.stats;
+            log::info!(
+                "bench [{label}]: {:.2} ms/frame (cpu {:.2} ms: cull {:.2}, encode {:.2}), {} sections drawn, {} draws, {:.0}k triangles",
+                wall,
+                cpu / options.bench as f64,
+                s.cull_ms,
+                s.encode_ms,
+                s.chunks_drawn,
+                s.draw_calls,
+                s.triangles as f64 / 1000.0
+            );
+        }
+        renderer.cull = mc_render::CullSettings {
+            frustum: true,
+            occlusion: true,
+        };
     }
     renderer.render(&game.world, &frame);
     let img = renderer.capture().expect("capture");
