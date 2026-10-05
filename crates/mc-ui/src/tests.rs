@@ -118,6 +118,18 @@ fn e_toggles_inventory_and_escape_pauses() {
 }
 
 #[test]
+fn hotbar_hit_test() {
+    let mut ui = Ui::new(assets());
+    let mut inv = Inventory::default();
+    ui.handle_input(&mut input(1280, 720), &mut inv, &hud());
+    // Scale 3: hotbar spans x 367..913, y 654..720 in physical pixels.
+    assert_eq!(ui.hotbar_slot_at(Vec2::new(640.0, 700.0)), Some(4));
+    assert_eq!(ui.hotbar_slot_at(Vec2::new(372.0, 700.0)), Some(0));
+    assert_eq!(ui.hotbar_slot_at(Vec2::new(905.0, 700.0)), Some(8));
+    assert_eq!(ui.hotbar_slot_at(Vec2::new(640.0, 600.0)), None);
+}
+
+#[test]
 fn hotbar_keys_and_scroll() {
     let mut ui = Ui::new(assets());
     let mut inv = Inventory::default();
@@ -357,4 +369,78 @@ fn software_render_smoke() {
     let before = img.data.clone();
     preview::SoftwareRenderer::new(a).render(&out, &mut img);
     assert_ne!(before, img.data);
+}
+
+#[test]
+fn furnace_persists_per_block_and_drops_contents() {
+    let mut ui = Ui::new(assets());
+    let mut inv = Inventory::default();
+    let h = HudInfo { dt: 0.0, ..hud() };
+    let pos = glam::IVec3::new(3, 64, -2);
+    ui.open_furnace(pos);
+    assert_eq!(ui.screen, Screen::Furnace);
+    ui.handle_input(&mut input(1280, 720), &mut inv, &h);
+    inv.slots[0] = Some(st("sand", 2));
+    inv.slots[1] = Some(st("coal", 1));
+    click_slot(&mut ui, &mut inv, &h, SlotId::Inv(0), MouseButton::Left);
+    click_slot(
+        &mut ui,
+        &mut inv,
+        &h,
+        SlotId::FurnaceInput,
+        MouseButton::Left,
+    );
+    click_slot(&mut ui, &mut inv, &h, SlotId::Inv(1), MouseButton::Left);
+    click_slot(
+        &mut ui,
+        &mut inv,
+        &h,
+        SlotId::FurnaceFuel,
+        MouseButton::Left,
+    );
+    assert_eq!(ui.furnace(pos).unwrap().input, Some(st("sand", 2)));
+    // Close: the furnace keeps its items and keeps smelting.
+    ui.close();
+    ui.handle_input(&mut input(1280, 720), &mut inv, &h);
+    assert_eq!(inv.count_of(ItemId::by_name("sand").unwrap()), 0);
+    ui.tick_furnaces(furnace::COOK_TIME + 0.5);
+    let f = ui.furnace(pos).unwrap();
+    assert_eq!(f.output, Some(st("glass", 1)));
+    // Another furnace is independent.
+    ui.open_furnace(glam::IVec3::ZERO);
+    assert_eq!(ui.container().furnace.unwrap().input, None);
+    ui.close();
+    // Breaking the block returns everything inside.
+    let drops = ui.remove_furnace(pos);
+    assert!(drops.contains(&st("glass", 1)));
+    assert!(drops.contains(&st("sand", 1)));
+    assert!(ui.furnace(pos).is_none());
+}
+
+#[test]
+fn double_click_collects_matching_items() {
+    let mut ui = Ui::new(assets());
+    let mut inv = Inventory::default();
+    let h = HudInfo { dt: 0.05, ..hud() };
+    inv.slots[9] = Some(st("dirt", 10));
+    inv.slots[20] = Some(st("dirt", 7));
+    ui.open(Screen::Inventory);
+    ui.handle_input(&mut input(1280, 720), &mut inv, &h);
+    let frame = |ui: &mut Ui, inv: &Inventory| {
+        let mut out = UiDrawList::default();
+        ui.build(&mut out, 1280.0, 720.0, inv, &h);
+    };
+    frame(&mut ui, &inv);
+    click_slot(&mut ui, &mut inv, &h, SlotId::Inv(9), MouseButton::Left);
+    assert_eq!(ui.carried(), Some(st("dirt", 10)));
+    frame(&mut ui, &inv);
+    click_slot(&mut ui, &mut inv, &h, SlotId::Inv(9), MouseButton::Left);
+    assert_eq!(ui.carried(), Some(st("dirt", 17)));
+    assert_eq!(inv.slots[20], None);
+    // A slow second click just places the stack.
+    for _ in 0..20 {
+        frame(&mut ui, &inv);
+    }
+    click_slot(&mut ui, &mut inv, &h, SlotId::Inv(9), MouseButton::Left);
+    assert_eq!(inv.slots[9], Some(st("dirt", 17)));
 }

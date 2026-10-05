@@ -8,6 +8,7 @@
 use mc_core::item::ItemKind;
 use mc_core::{Inventory, ItemId, ItemStack};
 
+use crate::furnace::{Furnace, fuel_time, smelt_result};
 use crate::recipes::RecipeBook;
 
 /// Identifies one slot of an open screen.
@@ -26,6 +27,10 @@ pub enum SlotId {
     Palette(ItemId),
     /// Creative "destroy item" slot.
     Trash,
+    /// Furnace slots.
+    FurnaceInput,
+    FurnaceFuel,
+    FurnaceOutput,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -43,6 +48,7 @@ pub enum MenuKind {
     Inventory,
     CraftingTable,
     Creative,
+    Furnace,
 }
 
 /// An in-progress drag across slots while carrying a stack.
@@ -58,6 +64,8 @@ pub struct Container {
     pub craft: [Option<ItemStack>; 9],
     pub craft_w: usize,
     pub carried: Option<ItemStack>,
+    /// The open furnace (only for [`MenuKind::Furnace`]).
+    pub furnace: Option<Furnace>,
 }
 
 const HOTBAR: std::ops::Range<usize> = 0..9;
@@ -74,6 +82,7 @@ impl Container {
                 2
             },
             carried: None,
+            furnace: None,
         }
     }
 
@@ -106,6 +115,9 @@ impl Container {
             SlotId::Result => self.result(recipes),
             SlotId::Palette(item) => Some(ItemStack::new(item, 1)),
             SlotId::Trash => None,
+            SlotId::FurnaceInput => self.furnace.and_then(|f| f.input),
+            SlotId::FurnaceFuel => self.furnace.and_then(|f| f.fuel),
+            SlotId::FurnaceOutput => self.furnace.and_then(|f| f.output),
         }
     }
 
@@ -121,6 +133,9 @@ impl Container {
             SlotId::Craft(i) if (i as usize) < self.craft_w * self.craft_w => {
                 self.craft.get_mut(i as usize)
             }
+            SlotId::FurnaceInput => self.furnace.as_mut().map(|f| &mut f.input),
+            SlotId::FurnaceFuel => self.furnace.as_mut().map(|f| &mut f.fuel),
+            SlotId::FurnaceOutput => self.furnace.as_mut().map(|f| &mut f.output),
             _ => None,
         }
     }
@@ -139,7 +154,8 @@ impl Container {
             SlotId::Armor(i) => {
                 matches!(stack.item.kind(), ItemKind::Armor { slot, .. } if slot == i)
             }
-            SlotId::Result | SlotId::Palette(_) | SlotId::Trash => false,
+            SlotId::FurnaceFuel => fuel_time(stack.item).is_some(),
+            SlotId::Result | SlotId::Palette(_) | SlotId::Trash | SlotId::FurnaceOutput => false,
             _ => true,
         }
     }
@@ -163,6 +179,7 @@ impl Container {
                 }
             }
             SlotId::Palette(item) => self.click_palette(inv, item, button, shift),
+            SlotId::FurnaceOutput if !shift => self.take_output(button),
             SlotId::Trash => {
                 if shift {
                     for slot in inv.slots.iter_mut() {
@@ -276,6 +293,35 @@ impl Container {
         }
     }
 
+    /// Take smelted items: the whole stack (or half with the secondary
+    /// button), or as many as fit onto a matching carried stack.
+    fn take_output(&mut self, button: ClickButton) {
+        let Some(f) = self.furnace.as_mut() else {
+            return;
+        };
+        let Some(out) = f.output else { return };
+        match self.carried {
+            None => {
+                let n = if button == ClickButton::Secondary {
+                    out.count.div_ceil(2)
+                } else {
+                    out.count
+                };
+                self.carried = Some(ItemStack { count: n, ..out });
+                f.output = take(out, n);
+            }
+            Some(c) if c.can_stack_with(&out) => {
+                let n = (c.item.max_stack().saturating_sub(c.count)).min(out.count);
+                self.carried = Some(ItemStack {
+                    count: c.count + n,
+                    ..c
+                });
+                f.output = take(out, n);
+            }
+            _ => {}
+        }
+    }
+
     /// Consume one of each ingredient.
     fn consume_ingredients(&mut self) {
         let n = self.craft_w * self.craft_w;
@@ -331,8 +377,14 @@ impl Container {
             return;
         };
         let rest = match s {
-            SlotId::Craft(_) | SlotId::Armor(_) | SlotId::Offhand => {
-                move_into(&mut inv.slots, stack, &main_then_hotbar)
+            SlotId::Craft(_)
+            | SlotId::Armor(_)
+            | SlotId::Offhand
+            | SlotId::FurnaceInput
+            | SlotId::FurnaceFuel => move_into(&mut inv.slots, stack, &main_then_hotbar),
+            SlotId::FurnaceOutput => {
+                let order: Vec<usize> = HOTBAR.rev().chain(MAIN.rev()).collect();
+                move_into(&mut inv.slots, stack, &order)
             }
             SlotId::Inv(i) => {
                 let i = i as usize;
@@ -344,6 +396,24 @@ impl Container {
                     if a < 4 && inv.armor[a].is_none() {
                         inv.armor[a] = Some(ItemStack { count: 1, ..stack });
                         self.set_raw(inv, s, take(stack, 1));
+                        return;
+                    }
+                }
+                // Furnace: smeltables to the input, fuel to the fuel slot.
+                if self.kind == MenuKind::Furnace {
+                    let target = if smelt_result(stack.item).is_some() {
+                        Some(SlotId::FurnaceInput)
+                    } else if fuel_time(stack.item).is_some() {
+                        Some(SlotId::FurnaceFuel)
+                    } else {
+                        None
+                    };
+                    if let Some(t) = target {
+                        let rest = match self.slot_mut(inv, t) {
+                            Some(slot) => insert_into(slot, stack),
+                            None => Some(stack),
+                        };
+                        self.set_raw(inv, s, rest);
                         return;
                     }
                 }
@@ -386,6 +456,9 @@ impl Container {
             SlotId::Offhand => inv.offhand,
             SlotId::Craft(i) if (i as usize) < self.craft_w * self.craft_w => {
                 self.craft[i as usize]
+            }
+            SlotId::FurnaceInput | SlotId::FurnaceFuel if self.furnace.is_some() => {
+                self.get_furnace_slot(s)
             }
             _ => return false,
         };
@@ -452,11 +525,11 @@ impl Container {
         }
         match s {
             SlotId::Result => {
-                if inv.slots[k].is_none() {
-                    if let Some(r) = self.result(recipes) {
-                        inv.slots[k] = Some(r);
-                        self.consume_ingredients();
-                    }
+                if inv.slots[k].is_none()
+                    && let Some(r) = self.result(recipes)
+                {
+                    inv.slots[k] = Some(r);
+                    self.consume_ingredients();
                 }
             }
             SlotId::Palette(item) => {
@@ -466,10 +539,10 @@ impl Container {
             _ => {
                 let here = self.get_raw(inv, s);
                 let there = inv.slots[k];
-                if let Some(t) = there {
-                    if !Self::accepts(s, &t) || t.count > Self::slot_limit(s, t.item) {
-                        return;
-                    }
+                if let Some(t) = there
+                    && (!Self::accepts(s, &t) || t.count > Self::slot_limit(s, t.item))
+                {
+                    return;
                 }
                 inv.slots[k] = here;
                 self.set_raw(inv, s, there);
@@ -521,9 +594,67 @@ impl Container {
         drops
     }
 
+    /// Double click: gather items matching the carried stack from the
+    /// crafting grid and inventory onto the cursor (partial stacks first).
+    pub fn collect(&mut self, inv: &mut Inventory) {
+        let Some(mut c) = self.carried else { return };
+        let max = c.item.max_stack();
+        if max <= 1 || c.damage != 0 {
+            return;
+        }
+        let n = self.craft_w * self.craft_w;
+        for full_pass in [false, true] {
+            let slots = self.craft[..n].iter_mut().chain(inv.slots.iter_mut());
+            for slot in slots {
+                if c.count >= max {
+                    break;
+                }
+                let Some(s) = *slot else { continue };
+                if !s.can_stack_with(&c) || (s.count >= max) != full_pass {
+                    continue;
+                }
+                let k = (max - c.count).min(s.count);
+                c.count += k;
+                *slot = take(s, k);
+            }
+        }
+        self.carried = Some(c);
+    }
+
     /// Anything still held by the container (grid or cursor)?
     pub fn holds_items(&self) -> bool {
         self.carried.is_some() || self.craft.iter().any(Option::is_some)
+    }
+}
+
+impl Container {
+    fn get_furnace_slot(&self, s: SlotId) -> Option<ItemStack> {
+        let f = self.furnace?;
+        match s {
+            SlotId::FurnaceInput => f.input,
+            SlotId::FurnaceFuel => f.fuel,
+            SlotId::FurnaceOutput => f.output,
+            _ => None,
+        }
+    }
+}
+
+/// Put as much of `stack` as fits into one slot; returns the remainder.
+fn insert_into(slot: &mut Option<ItemStack>, stack: ItemStack) -> Option<ItemStack> {
+    match *slot {
+        None => {
+            *slot = Some(stack);
+            None
+        }
+        Some(s) if s.can_stack_with(&stack) => {
+            let n = s.item.max_stack().saturating_sub(s.count).min(stack.count);
+            *slot = Some(ItemStack {
+                count: s.count + n,
+                ..s
+            });
+            take(stack, n)
+        }
+        Some(_) => Some(stack),
     }
 }
 
@@ -542,14 +673,15 @@ pub fn move_into(
 ) -> Option<ItemStack> {
     let max = stack.item.max_stack();
     for &i in targets {
-        if let Some(s) = &mut slots[i] {
-            if s.can_stack_with(&stack) && s.count < max {
-                let n = (max - s.count).min(stack.count);
-                s.count += n;
-                stack.count -= n;
-                if stack.count == 0 {
-                    return None;
-                }
+        if let Some(s) = &mut slots[i]
+            && s.can_stack_with(&stack)
+            && s.count < max
+        {
+            let n = (max - s.count).min(stack.count);
+            s.count += n;
+            stack.count -= n;
+            if stack.count == 0 {
+                return None;
             }
         }
     }
@@ -802,6 +934,58 @@ mod tests {
         c.click(&mut inv, &rb, SlotId::Armor(0), L, false, false);
         assert_eq!(inv.armor[0], None);
         assert_eq!(c.carried, Some(st("dirt", 1)));
+    }
+
+    #[test]
+    fn double_click_collects() {
+        let (mut c, mut inv, _rb) = setup();
+        c.carried = Some(st("dirt", 10));
+        inv.slots[3] = Some(st("dirt", 64));
+        inv.slots[12] = Some(st("dirt", 20));
+        inv.slots[13] = Some(st("stone", 20));
+        c.craft[0] = Some(st("dirt", 5));
+        c.collect(&mut inv);
+        // Partial stacks first (grid 5, then slot 12's 20), then full ones.
+        assert_eq!(c.carried, Some(st("dirt", 64)));
+        assert_eq!(c.craft[0], None);
+        assert_eq!(inv.slots[12], None);
+        assert_eq!(inv.slots[3], Some(st("dirt", 35)));
+        assert_eq!(inv.slots[13], Some(st("stone", 20)));
+    }
+
+    #[test]
+    fn furnace_slots() {
+        let mut c = Container::new(MenuKind::Furnace);
+        c.furnace = Some(Furnace::default());
+        let mut inv = Inventory::default();
+        let rb = RecipeBook::standard();
+        inv.slots[0] = Some(st("sand", 10));
+        inv.slots[1] = Some(st("coal", 3));
+        inv.slots[2] = Some(st("dirt", 3));
+        // Shift-click routes smeltables and fuel.
+        c.click(&mut inv, &rb, SlotId::Inv(0), L, true, false);
+        c.click(&mut inv, &rb, SlotId::Inv(1), L, true, false);
+        c.click(&mut inv, &rb, SlotId::Inv(2), L, true, false);
+        let f = c.furnace.unwrap();
+        assert_eq!(f.input, Some(st("sand", 10)));
+        assert_eq!(f.fuel, Some(st("coal", 3)));
+        assert_eq!(inv.slots[2], None);
+        assert_eq!(inv.slots[9], Some(st("dirt", 3)));
+        // Dirt is not fuel.
+        c.carried = Some(st("dirt", 3));
+        c.click(&mut inv, &rb, SlotId::FurnaceFuel, L, false, false);
+        assert_eq!(c.carried, Some(st("dirt", 3)));
+        c.carried = None;
+        // Output can be taken but not filled.
+        c.furnace.as_mut().unwrap().output = Some(st("glass", 4));
+        c.click(&mut inv, &rb, SlotId::FurnaceOutput, R, false, false);
+        assert_eq!(c.carried, Some(st("glass", 2)));
+        c.click(&mut inv, &rb, SlotId::FurnaceOutput, L, false, false);
+        assert_eq!(c.carried, Some(st("glass", 4)));
+        assert_eq!(c.furnace.unwrap().output, None);
+        c.click(&mut inv, &rb, SlotId::FurnaceOutput, L, false, false);
+        assert_eq!(c.furnace.unwrap().output, None);
+        assert_eq!(c.carried, Some(st("glass", 4)));
     }
 
     #[test]

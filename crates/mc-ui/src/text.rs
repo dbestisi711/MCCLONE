@@ -257,6 +257,7 @@ impl Font {
     /// Draw `text` with its cap top at (`x`, `y`) in GUI pixels. `size`
     /// multiplies the glyph size (2.0 for titles). Returns the width in GUI
     /// pixels. Supports `§0`..`§f` colour codes and `§r` reset.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         p: &mut Painter,

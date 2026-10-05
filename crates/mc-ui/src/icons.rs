@@ -282,13 +282,13 @@ impl ItemIcons {
     ) {
         if let ItemKind::Tool { durability, .. } | ItemKind::Armor { durability, .. } =
             stack.item.kind()
+            && stack.damage > 0
+            && durability > 0
         {
-            if stack.damage > 0 && durability > 0 {
-                let frac = 1.0 - (stack.damage as f32 / durability as f32).clamp(0.0, 1.0);
-                let w = (13.0 * frac).round();
-                p.solid(x + 2.0, y + 13.0, 13.0, 2.0, [0.0, 0.0, 0.0, 1.0]);
-                p.solid(x + 2.0, y + 13.0, w, 1.0, durability_color(frac));
-            }
+            let frac = 1.0 - (stack.damage as f32 / durability as f32).clamp(0.0, 1.0);
+            let w = (13.0 * frac).round();
+            p.solid(x + 2.0, y + 13.0, 13.0, 2.0, [0.0, 0.0, 0.0, 1.0]);
+            p.solid(x + 2.0, y + 13.0, w, 1.0, durability_color(frac));
         }
         let text;
         let label = match count_override {

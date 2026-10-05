@@ -30,20 +30,20 @@ impl HudState {
         self.time += dt;
         // Selected item name.
         let sel = (inv.selected, inv.selected_item());
-        if let Some(last) = self.last_sel {
-            if last != sel {
-                self.name_item = sel.1;
-                self.name_timer = if sel.1.is_some() { NAME_TIME } else { 0.0 };
-            }
+        if let Some(last) = self.last_sel
+            && last != sel
+        {
+            self.name_item = sel.1;
+            self.name_timer = if sel.1.is_some() { NAME_TIME } else { 0.0 };
         }
         self.last_sel = Some(sel);
         self.name_timer = (self.name_timer - dt).max(0.0);
         // Damage blink.
-        if let Some(prev) = self.prev_health {
-            if hud.health < prev {
-                self.blink_timer = BLINK_TIME;
-                self.blink_from = self.blink_from.max(prev);
-            }
+        if let Some(prev) = self.prev_health
+            && hud.health < prev
+        {
+            self.blink_timer = BLINK_TIME;
+            self.blink_from = self.blink_from.max(prev);
         }
         self.prev_health = Some(hud.health);
         self.blink_timer = (self.blink_timer - dt).max(0.0);

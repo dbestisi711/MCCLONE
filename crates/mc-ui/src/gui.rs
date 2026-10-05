@@ -137,13 +137,13 @@ impl NineSlice {
                 }
                 _ => {}
             }
-            if let Some(b) = json["base_size"].as_array() {
-                if b.len() == 2 {
-                    base = [
-                        b[0].as_f64().unwrap_or(base[0] as f64) as f32,
-                        b[1].as_f64().unwrap_or(base[1] as f64) as f32,
-                    ];
-                }
+            if let Some(b) = json["base_size"].as_array()
+                && b.len() == 2
+            {
+                base = [
+                    b[0].as_f64().unwrap_or(base[0] as f64) as f32,
+                    b[1].as_f64().unwrap_or(base[1] as f64) as f32,
+                ];
             }
         }
         let (rx, ry) = if sprite.ok && base[0] > 0.0 && base[1] > 0.0 {
@@ -204,6 +204,10 @@ pub struct Skin {
     pub bubble_pop: Sprite,
     pub arrow: Sprite,
     pub arrow_small: Sprite,
+    pub arrow_active: Sprite,
+    pub arrow_inactive: Sprite,
+    pub flame_empty: Sprite,
+    pub flame_full: Sprite,
     pub empty_armor: [Sprite; 4],
     pub empty_offhand: Sprite,
     pub trash: Sprite,
@@ -268,6 +272,10 @@ impl Skin {
             bubble_pop: s("bubble_pop"),
             arrow: s("arrow_large"),
             arrow_small: s("arrow"),
+            arrow_active: s("arrow_active"),
+            arrow_inactive: s("arrow_inactive"),
+            flame_empty: s("flame_empty_image"),
+            flame_full: s("flame_full_image"),
             empty_armor: [
                 s("empty_armor_slot_helmet"),
                 s("empty_armor_slot_chestplate"),

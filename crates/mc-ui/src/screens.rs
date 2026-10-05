@@ -15,6 +15,8 @@ const LABEL: Color = rgb(0x404040);
 /// Creative palette: visible rows.
 const PALETTE_ROWS: usize = 5;
 const PALETTE_COLS: usize = 9;
+/// Max seconds between the clicks of a double click.
+const DOUBLE_CLICK: f32 = 0.3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ButtonId {
@@ -147,6 +149,22 @@ impl Ui {
                     id: SlotId::Result,
                     x: x0 + 152.0,
                     y: y0 + 28.0,
+                    big: true,
+                });
+                player_rows(&mut l, x0, y0, 84.0, 142.0);
+            }
+            Screen::Furnace => {
+                let r = center(176.0, 166.0);
+                let (x0, y0) = (r[0], r[1]);
+                l.panel = Some(r);
+                l.slots
+                    .push(slot(SlotId::FurnaceInput, x0 + 56.0, y0 + 17.0));
+                l.slots
+                    .push(slot(SlotId::FurnaceFuel, x0 + 56.0, y0 + 53.0));
+                l.slots.push(SlotPos {
+                    id: SlotId::FurnaceOutput,
+                    x: x0 + 116.0,
+                    y: y0 + 35.0,
                     big: true,
                 });
                 player_rows(&mut l, x0, y0, 84.0, 142.0);
@@ -295,16 +313,16 @@ impl Ui {
 
     pub(crate) fn pointer_move(&mut self, inv: &mut Inventory, hud: &HudInfo) {
         let lay = self.layout(hud);
-        if self.scroll_drag {
-            if let Some(track) = lay.scrollbar {
-                self.scroll_to_cursor(track);
-            }
+        if self.scroll_drag
+            && let Some(track) = lay.scrollbar
+        {
+            self.scroll_to_cursor(track);
         }
         if let Some(mut drag) = self.drag.take() {
-            if let Some(s) = lay.slot_at(self.cursor) {
-                if self.container.drag_accepts(inv, &drag, s.id) {
-                    drag.slots.push(s.id);
-                }
+            if let Some(s) = lay.slot_at(self.cursor)
+                && self.container.drag_accepts(inv, &drag, s.id)
+            {
+                drag.slots.push(s.id);
             }
             self.drag = Some(drag);
         }
@@ -335,8 +353,8 @@ impl Ui {
             }
             return;
         }
-        if let Some(track) = lay.scrollbar {
-            if contains(
+        if let Some(track) = lay.scrollbar
+            && contains(
                 [
                     track[0] - 1.0,
                     track[1] - 1.0,
@@ -344,14 +362,28 @@ impl Ui {
                     track[3] + 2.0,
                 ],
                 self.cursor,
-            ) {
-                self.scroll_drag = true;
-                self.scroll_to_cursor(track);
-                return;
-            }
+            )
+        {
+            self.scroll_drag = true;
+            self.scroll_to_cursor(track);
+            return;
         }
         let creative = hud.creative || self.screen == Screen::CreativeInventory;
         if let Some(s) = lay.slot_at(self.cursor) {
+            // Double click with a stack on the cursor collects matching items.
+            let now = self.hud_state.time;
+            let double = button == ClickButton::Primary
+                && !self.shift
+                && self.container.carried.is_some()
+                && self
+                    .last_click
+                    .is_some_and(|(id, t)| id == s.id && now > t && now - t < DOUBLE_CLICK);
+            self.last_click = (button == ClickButton::Primary).then_some((s.id, now));
+            if double {
+                self.last_click = None;
+                self.container.collect(inv);
+                return;
+            }
             // Carrying a stack: start a drag that may spread it over slots.
             if self.container.carried.is_some() && !self.shift && button != ClickButton::Middle {
                 let drag = Drag {
@@ -370,10 +402,10 @@ impl Ui {
                 .click(inv, &self.recipes, s.id, button, self.shift, creative);
             return;
         }
-        if !lay.inside(self.cursor) {
-            if let Some(d) = self.container.click_outside(button) {
-                actions.push(UiAction::Drop(d));
-            }
+        if !lay.inside(self.cursor)
+            && let Some(d) = self.container.click_outside(button)
+        {
+            actions.push(UiAction::Drop(d));
         }
     }
 
@@ -446,7 +478,10 @@ impl Ui {
                     2.0,
                 );
             }
-            Screen::Inventory | Screen::CraftingTable | Screen::CreativeInventory => {
+            Screen::Inventory
+            | Screen::CraftingTable
+            | Screen::CreativeInventory
+            | Screen::Furnace => {
                 self.draw_container(p, inv, hud, &lay);
             }
             Screen::None => {}
@@ -508,10 +543,8 @@ impl Ui {
             }
         }
         p.nine(&self.skin.panel, x0, y0, pw, ph, WHITE);
-        if creative {
-            if let Some(&(i, r)) = lay.tabs.iter().find(|(i, _)| *i == self.creative_tab) {
-                self.draw_tab(p, i, r, true);
-            }
+        if creative && let Some(&(i, r)) = lay.tabs.iter().find(|(i, _)| *i == self.creative_tab) {
+            self.draw_tab(p, i, r, true);
         }
 
         // Labels and decorations.
@@ -528,6 +561,16 @@ impl Ui {
                 self.font
                     .draw(p, "Inventory", x0 + 8.0, y0 + 73.0, LABEL, false, 1.0);
                 self.draw_arrow(p, &self.skin.arrow, x0 + 92.0, y0 + 35.0);
+            }
+            Screen::Furnace => {
+                let w = self.font.width("Furnace", p.scale);
+                let tx = (x0 + (pw - w) / 2.0).round();
+                self.font
+                    .draw(p, "Furnace", tx, y0 + 6.0, LABEL, false, 1.0);
+                self.font
+                    .draw(p, "Inventory", x0 + 8.0, y0 + 73.0, LABEL, false, 1.0);
+                let f = self.container.furnace.unwrap_or_default();
+                self.draw_furnace_gauges(p, &f, x0, y0);
             }
             Screen::CreativeInventory => {
                 let name = self
@@ -558,18 +601,17 @@ impl Ui {
             self.draw_slot_frame(p, s, inv);
             let mut stack = self.container.get(inv, &self.recipes, s.id);
             let mut dragged = false;
-            if let Some((d, share)) = &drag_share {
-                if d.slots.contains(&s.id) {
-                    if let Some(c) = self.container.carried {
-                        let have = stack.map(|x| x.count).unwrap_or(0);
-                        let limit = Container::slot_limit(s.id, c.item);
-                        stack = Some(ItemStack {
-                            count: (have + share).min(limit),
-                            ..c
-                        });
-                        dragged = true;
-                    }
-                }
+            if let Some((d, share)) = &drag_share
+                && d.slots.contains(&s.id)
+                && let Some(c) = self.container.carried
+            {
+                let have = stack.map(|x| x.count).unwrap_or(0);
+                let limit = Container::slot_limit(s.id, c.item);
+                stack = Some(ItemStack {
+                    count: (have + share).min(limit),
+                    ..c
+                });
+                dragged = true;
             }
             if dragged {
                 p.solid(s.x, s.y, 16.0, 16.0, [1.0, 1.0, 1.0, 0.3]);
@@ -614,6 +656,10 @@ impl Ui {
             } else if h.id == SlotId::Trash {
                 self.draw_tooltip_text(p, &["Destroy Item"]);
             }
+        } else if let Some((i, _)) = lay.tabs.iter().find(|(_, r)| contains(*r, self.cursor))
+            && let Some(tab) = self.tabs.get(*i)
+        {
+            self.draw_tooltip_text(p, &[tab.name]);
         }
         let _ = hud;
     }
@@ -649,6 +695,35 @@ impl Ui {
                     [0.25, 0.25, 0.25, 0.6],
                 );
             }
+        }
+    }
+
+    /// Flame (fuel left) and progress arrow of the furnace screen.
+    fn draw_furnace_gauges(&self, p: &mut Painter, f: &crate::furnace::Furnace, x0: f32, y0: f32) {
+        let s = &self.skin;
+        let (fx, fy) = (x0 + 57.0, y0 + 37.0);
+        p.sprite_at(&s.flame_empty, fx, fy, WHITE);
+        if f.burning() {
+            // The flame shrinks from the top as fuel burns down.
+            let h = s.flame_full.height();
+            let shown = (h * f.burn_fraction()).ceil();
+            p.sprite_part(
+                &s.flame_full,
+                [0.0, h - shown, s.flame_full.width(), shown],
+                [fx, fy + h - shown, s.flame_full.width(), shown],
+                WHITE,
+            );
+        }
+        let (ax, ay) = (x0 + 79.0, y0 + 34.0);
+        p.sprite_at(&s.arrow_inactive, ax, ay, WHITE);
+        let w = (s.arrow_active.width() * f.cook_fraction()).round();
+        if w > 0.0 {
+            p.sprite_part(
+                &s.arrow_active,
+                [0.0, 0.0, w, s.arrow_active.height()],
+                [ax, ay, w, s.arrow_active.height()],
+                WHITE,
+            );
         }
     }
 
@@ -701,14 +776,14 @@ impl Ui {
 
     fn draw_tooltip(&self, p: &mut Painter, st: &ItemStack) {
         let mut lines = vec![st.item.display().to_string()];
-        if let mc_core::item::ItemKind::Tool { durability, .. } = st.item.kind() {
-            if st.damage > 0 {
-                lines.push(format!(
-                    "§7Durability: {} / {}",
-                    durability.saturating_sub(st.damage),
-                    durability
-                ));
-            }
+        if let mc_core::item::ItemKind::Tool { durability, .. } = st.item.kind()
+            && st.damage > 0
+        {
+            lines.push(format!(
+                "§7Durability: {} / {}",
+                durability.saturating_sub(st.damage),
+                durability
+            ));
         }
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         self.draw_tooltip_text(p, &refs);

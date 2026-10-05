@@ -169,6 +169,22 @@ fn main() {
     render(&mut ui, &inv, &hud, "ui_crafting");
     set_grid(&mut ui, &[]);
 
+    // Furnace smelting iron, half way through an item.
+    ui.open(Screen::Furnace);
+    ui.container_mut().furnace = Some(mc_ui::furnace::Furnace {
+        input: st("raw_iron", 5),
+        fuel: st("coal", 3),
+        output: st("iron_ingot", 2),
+        burn_left: 50.0,
+        burn_total: 80.0,
+        cook: 5.5,
+    });
+    move_cursor(&mut ui, &mut inv, &hud, w, h, Vec2::new(10.0, 10.0));
+    let saved_dt = hud.dt;
+    hud.dt = 0.0;
+    render(&mut ui, &inv, &hud, "ui_furnace");
+    hud.dt = saved_dt;
+
     // Creative inventory.
     hud.creative = true;
     ui.open(Screen::CreativeInventory);

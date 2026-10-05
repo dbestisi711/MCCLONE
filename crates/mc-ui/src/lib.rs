@@ -19,6 +19,7 @@
 
 pub mod container;
 pub mod creative;
+pub mod furnace;
 pub mod gui;
 mod hud;
 pub mod icons;
@@ -27,14 +28,13 @@ pub mod recipes;
 mod screens;
 pub mod text;
 
-use glam::Vec2;
+use glam::{IVec3, Vec2};
 use mc_core::input::{InputState, Key, MouseButton};
 use mc_core::render_types::UiDrawList;
 use mc_core::{Inventory, ItemId, ItemStack};
+use rustc_hash::FxHashMap as HashMap;
 
-#[cfg(test)]
-use container::SlotId;
-use container::{ClickButton, Container, Drag, MenuKind};
+use container::{ClickButton, Container, Drag, MenuKind, SlotId};
 use gui::{Painter, Skin};
 use icons::ItemIcons;
 use recipes::RecipeBook;
@@ -85,6 +85,8 @@ pub enum Screen {
     Death,
     /// Creative item palette with category tabs.
     CreativeInventory,
+    /// Furnace (open with [`Ui::open_furnace`]).
+    Furnace,
 }
 
 impl Screen {
@@ -92,7 +94,7 @@ impl Screen {
     pub fn has_slots(self) -> bool {
         matches!(
             self,
-            Screen::Inventory | Screen::CraftingTable | Screen::CreativeInventory
+            Screen::Inventory | Screen::CraftingTable | Screen::CreativeInventory | Screen::Furnace
         )
     }
 }
@@ -129,6 +131,8 @@ pub struct Ui {
     pub(crate) creative_tab: usize,
     pub(crate) creative_scroll: usize,
     pub(crate) scroll_drag: bool,
+    /// Last primary click (slot, HUD time) for double-click detection.
+    pub(crate) last_click: Option<(SlotId, f32)>,
     /// Items taken out of a closed screen, returned on the next input pass.
     pending_return: Vec<ItemStack>,
     textures_sent: bool,
@@ -137,7 +141,14 @@ pub struct Ui {
     /// "Respawn" was clicked; don't reopen the death screen until the game
     /// reports the player alive.
     pub(crate) respawn_requested: bool,
+    /// Furnace contents by block position (they keep smelting while closed).
+    furnaces: HashMap<IVec3, furnace::Furnace>,
+    /// Position of the furnace shown by the open furnace screen.
+    furnace_pos: Option<IVec3>,
 }
+
+/// Key for a furnace opened without a block position (previews, tests).
+const PORTABLE_FURNACE: IVec3 = IVec3::new(i32::MIN, i32::MIN, i32::MIN);
 
 impl Ui {
     pub fn new(assets: &mc_assets::Assets) -> Self {
@@ -159,11 +170,14 @@ impl Ui {
             creative_tab: 0,
             creative_scroll: 0,
             scroll_drag: false,
+            last_click: None,
             pending_return: Vec::new(),
             textures_sent: false,
             hud_state: hud::HudState::default(),
             gui_size: Vec2::new(640.0, 360.0),
             respawn_requested: false,
+            furnaces: HashMap::default(),
+            furnace_pos: None,
         }
     }
 
@@ -184,8 +198,63 @@ impl Ui {
             Screen::Inventory => self.container.set_kind(MenuKind::Inventory),
             Screen::CraftingTable => self.container.set_kind(MenuKind::CraftingTable),
             Screen::CreativeInventory => self.container.set_kind(MenuKind::Creative),
+            Screen::Furnace => {
+                let pos = self.furnace_pos.unwrap_or(PORTABLE_FURNACE);
+                self.furnace_pos = Some(pos);
+                self.container.set_kind(MenuKind::Furnace);
+                self.container.furnace = Some(self.furnaces.remove(&pos).unwrap_or_default());
+            }
             _ => {}
         }
+    }
+
+    /// Open the furnace screen for the furnace block at `pos`.
+    pub fn open_furnace(&mut self, pos: IVec3) {
+        if self.screen == Screen::Furnace && self.furnace_pos == Some(pos) {
+            return;
+        }
+        self.close();
+        self.furnace_pos = Some(pos);
+        self.open(Screen::Furnace);
+    }
+
+    /// The furnace block at `pos` was broken: forget it and return its
+    /// contents (for the game to drop).
+    pub fn remove_furnace(&mut self, pos: IVec3) -> Vec<ItemStack> {
+        if self.screen == Screen::Furnace && self.furnace_pos == Some(pos) {
+            self.close();
+        }
+        self.furnaces
+            .remove(&pos)
+            .map(|f| f.contents())
+            .unwrap_or_default()
+    }
+
+    /// State of the furnace at `pos` (e.g. to render it lit).
+    pub fn furnace(&self, pos: IVec3) -> Option<&furnace::Furnace> {
+        if self.furnace_pos == Some(pos)
+            && let Some(f) = &self.container.furnace
+        {
+            return Some(f);
+        }
+        self.furnaces.get(&pos)
+    }
+
+    /// Advance all furnaces by `dt` seconds. Called from [`Ui::build`] with
+    /// [`HudInfo::dt`] (not while paused).
+    pub fn tick_furnaces(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        for f in self.furnaces.values_mut() {
+            f.tick(dt);
+        }
+        if let Some(f) = &mut self.container.furnace {
+            f.tick(dt);
+        }
+        // Drop empty, idle furnaces from the map.
+        self.furnaces
+            .retain(|_, f| f.burning() || !f.contents().is_empty());
     }
 
     /// Close the current screen.
@@ -208,6 +277,18 @@ impl Ui {
         &mut self.container
     }
 
+    /// Hotbar slot under a physical-pixel position when no screen is open
+    /// (for tapping the hotbar on touch screens).
+    pub fn hotbar_slot_at(&self, pos: Vec2) -> Option<usize> {
+        let p = pos / self.scale;
+        let x0 = (self.gui_size.x / 2.0).floor() - 91.0;
+        let y0 = self.gui_size.y - 22.0;
+        if p.y < y0 || p.y >= y0 + 22.0 || p.x < x0 + 1.0 || p.x >= x0 + 181.0 {
+            return None;
+        }
+        Some((((p.x - x0 - 1.0) / 20.0) as usize).min(8))
+    }
+
     /// The stack currently carried on the cursor.
     pub fn carried(&self) -> Option<ItemStack> {
         self.container.carried
@@ -224,6 +305,10 @@ impl Ui {
             if let Some(s) = slot.take() {
                 self.pending_return.push(s);
             }
+        }
+        if let Some(f) = self.container.furnace.take() {
+            let pos = self.furnace_pos.take().unwrap_or(PORTABLE_FURNACE);
+            self.furnaces.insert(pos, f);
         }
     }
 
@@ -325,19 +410,19 @@ impl Ui {
         if self.screen.has_slots() {
             let hovered = self.hovered_slot(inventory, hud);
             for i in 0..9u8 {
-                if input.consume(Key::Hotbar(i)) {
-                    if let (Some(s), None) = (hovered, self.container.carried) {
-                        self.container
-                            .swap_with_hotbar(inventory, &self.recipes, s, i as usize);
-                    }
+                if input.consume(Key::Hotbar(i))
+                    && let (Some(s), None) = (hovered, self.container.carried)
+                {
+                    self.container
+                        .swap_with_hotbar(inventory, &self.recipes, s, i as usize);
                 }
             }
-            if input.consume(Key::Drop) {
-                if let (Some(s), None) = (hovered, self.container.carried) {
-                    let whole = input.held(Key::Sprint);
-                    if let Some(d) = self.container.drop_from(inventory, &self.recipes, s, whole) {
-                        actions.push(UiAction::Drop(d));
-                    }
+            if input.consume(Key::Drop)
+                && let (Some(s), None) = (hovered, self.container.carried)
+            {
+                let whole = input.held(Key::Sprint);
+                if let Some(d) = self.container.drop_from(inventory, &self.recipes, s, whole) {
+                    actions.push(UiAction::Drop(d));
                 }
             }
         }
@@ -400,6 +485,9 @@ impl Ui {
             self.textures_sent = true;
         }
         self.hud_state.update(inventory, hud);
+        if self.screen != Screen::Pause {
+            self.tick_furnaces(hud.dt);
+        }
         let mut p = Painter::new(out, self.scale);
         let open = self.screen != Screen::None;
         if !self.hide_hud {
