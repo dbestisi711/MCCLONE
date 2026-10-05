@@ -9,3 +9,6 @@ mc-core.workspace = true
 glam.workspace = true
 rustc-hash.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+image.workspace = true

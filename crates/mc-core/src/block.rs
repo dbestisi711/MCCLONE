@@ -504,6 +504,25 @@ define_blocks! {
         d.solid = true; d
     },
     VINE => { let mut d = plant("vine", "vine", "Vines").tint(Tint::Foliage); d.replaceable = true; d.needs_support = false; d },
+    // World generation additions (badlands bands, huge mushrooms, mangroves, flowers, ore veins).
+    WHITE_TERRACOTTA => stone_like("white_terracotta", "white_terracotta", "White Terracotta", 1.25),
+    ORANGE_TERRACOTTA => stone_like("orange_terracotta", "orange_terracotta", "Orange Terracotta", 1.25),
+    YELLOW_TERRACOTTA => stone_like("yellow_terracotta", "yellow_terracotta", "Yellow Terracotta", 1.25),
+    LIGHT_GRAY_TERRACOTTA => stone_like("light_gray_terracotta", "light_gray_terracotta", "Light Gray Terracotta", 1.25),
+    BROWN_TERRACOTTA => stone_like("brown_terracotta", "brown_terracotta", "Brown Terracotta", 1.25),
+    RED_TERRACOTTA => stone_like("red_terracotta", "red_terracotta", "Red Terracotta", 1.25),
+    BROWN_MUSHROOM_BLOCK => wood("brown_mushroom_block", "brown_mushroom_block", "Brown Mushroom Block").hardness(0.2).drop(Drop::Other("brown_mushroom", 1)),
+    RED_MUSHROOM_BLOCK => wood("red_mushroom_block", "red_mushroom_block", "Red Mushroom Block").hardness(0.2).drop(Drop::Other("red_mushroom", 1)),
+    MUSHROOM_STEM => wood("mushroom_stem", "mushroom_stem", "Mushroom Stem").hardness(0.2).drop(Drop::Nothing),
+    MANGROVE_LEAVES => leaves("mangrove_leaves", "mangrove_leaves", "Mangrove Leaves", Tint::Foliage),
+    MANGROVE_ROOTS => wood("mangrove_roots", "mangrove_roots", "Mangrove Roots").hardness(0.7).cutout(),
+    MUDDY_MANGROVE_ROOTS => dirt_like("muddy_mangrove_roots", "muddy_mangrove_roots", "Muddy Mangrove Roots", 0.7),
+    ALLIUM => plant("allium", "allium", "Allium"),
+    AZURE_BLUET => plant("azure_bluet", "azure_bluet", "Azure Bluet"),
+    OXEYE_DAISY => plant("oxeye_daisy", "oxeye_daisy", "Oxeye Daisy"),
+    LILY_OF_THE_VALLEY => plant("lily_of_the_valley", "lily_of_the_valley", "Lily of the Valley"),
+    RAW_IRON_BLOCK => stone_like("raw_iron_block", "raw_iron_block", "Block of Raw Iron", 5.0),
+    RAW_COPPER_BLOCK => stone_like("raw_copper_block", "raw_copper_block", "Block of Raw Copper", 5.0),
 }
 
 #[cfg(test)]
