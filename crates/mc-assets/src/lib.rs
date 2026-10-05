@@ -11,7 +11,13 @@
 //! - [`Assets::load`] → [`BlockTextures`], [`ItemIcons`], [`EntityModels`], [`ColorMaps`]
 //! - [`generate_mips`] (alpha-aware mip chain for block tiles)
 //! - [`EntityModel::mesh`] / [`EntityModel::bone_matrices`] (posed entity triangles)
-//! - [`EntityModels::client_entity`] (`"minecraft:pig"` → geometry ids + texture paths)
+//! - [`EntityModels::client_entity`] (`"minecraft:pig"` → geometry ids + texture paths),
+//!   [`EntityModels::entity_model`], [`EntityModels::rest_pose`]
+//! - [`ItemIcons::display_icon`] (flat or isometric icon per item), the icon
+//!   `atlas` + [`ItemIcons::atlas_uv`], [`ItemIcons::render_block_icon`]
+//!
+//! Visual check: `cargo run -p mc-assets --example dump -- <out_dir>` writes
+//! contact sheets of tiles, blocks, item icons and posed mob models.
 //!
 //! ## Block textures
 //! Every block in `mc_core::block::BLOCK_DEFS` is resolved through
