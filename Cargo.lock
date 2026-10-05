@@ -1119,10 +1119,12 @@ version = "0.1.0"
 dependencies = [
  "fontdue",
  "glam",
+ "image",
  "log",
  "mc-assets",
  "mc-core",
  "rustc-hash 2.1.3",
+ "serde_json",
 ]
 
 [[package]]

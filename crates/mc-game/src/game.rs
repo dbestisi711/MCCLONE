@@ -149,6 +149,8 @@ impl Game {
             Some("inventory") => ui.open(Screen::Inventory),
             Some("crafting") => ui.open(Screen::CraftingTable),
             Some("pause") => ui.open(Screen::Pause),
+            Some("creative") => ui.open(Screen::CreativeInventory),
+            Some("death") => ui.open(Screen::Death),
             _ => {}
         }
         Game {
@@ -236,6 +238,7 @@ impl Game {
             debug_lines,
             target: self.target.map(|t| t.id.def().display.to_string()),
             dead: p.dead,
+            dt: 0.0,
         }
     }
 
@@ -368,7 +371,8 @@ impl Game {
             });
         }
         let (w, h) = self.input.window_size;
-        let hud = self.hud_info();
+        let mut hud = self.hud_info();
+        hud.dt = dt;
         self.ui.build(
             &mut frame.ui,
             w as f32,

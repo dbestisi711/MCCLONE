@@ -2,14 +2,43 @@
 //!
 //! OWNER: inventory & UI agent. Public API used by `mc-game` (keep stable,
 //! add freely):
-//! - [`Ui::new`], [`Ui::handle_input`], [`Ui::build`], [`Ui::screen_open`]
+//! - [`Ui::new`], [`Ui::handle_input`], [`Ui::build`], [`Ui::screen_open`],
+//!   [`Ui::open`], [`Ui::close`], [`Ui::pointer`] (device-agnostic pointer
+//!   events, e.g. for touch input)
+//! - [`HudInfo`] (filled by the game every frame), [`UiAction`], [`Screen`]
+//! - [`recipes::RecipeBook`], [`container::Container`] (pure click logic)
+//! - [`preview::SoftwareRenderer`] (CPU rasteriser for `UiDrawList`s, used
+//!   for previews and tests)
 //!
 //! The UI never touches the GPU: it emits a `UiDrawList` of textured quads in
-//! physical pixels which `mc-render` draws on top of the world.
+//! physical pixels which `mc-render` draws on top of the world. GUI art is
+//! read from the resource pack at runtime (`textures/ui/*`, `textures/gui/*`);
+//! the font atlas (`@font`) and item icon atlas (`@items`) are uploaded as
+//! dynamic textures on the first frame. All GUI textures are pixel art and
+//! should be sampled with nearest filtering.
 
-use mc_core::Inventory;
-use mc_core::input::{InputState, Key};
-use mc_core::render_types::{UiDrawList, UiQuad};
+pub mod container;
+pub mod creative;
+pub mod gui;
+mod hud;
+pub mod icons;
+pub mod preview;
+pub mod recipes;
+mod screens;
+pub mod text;
+
+use glam::Vec2;
+use mc_core::input::{InputState, Key, MouseButton};
+use mc_core::render_types::UiDrawList;
+use mc_core::{Inventory, ItemId, ItemStack};
+
+#[cfg(test)]
+use container::SlotId;
+use container::{ClickButton, Container, Drag, MenuKind};
+use gui::{Painter, Skin};
+use icons::ItemIcons;
+use recipes::RecipeBook;
+use text::Font;
 
 /// Values the HUD displays; filled by `mc-game` each frame.
 #[derive(Clone, Debug, Default)]
@@ -29,6 +58,9 @@ pub struct HudInfo {
     /// Name of the targeted block (for the debug overlay).
     pub target: Option<String>,
     pub dead: bool,
+    /// Seconds since the previous frame (drives HUD animations such as the
+    /// selected-item name fade and heart blinking). 0 freezes animations.
+    pub dt: f32,
 }
 
 /// Things the UI asks the game to do.
@@ -45,10 +77,35 @@ pub enum UiAction {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     None,
+    /// Survival inventory (2×2 crafting, armor).
     Inventory,
+    /// Crafting table (3×3 crafting).
     CraftingTable,
     Pause,
     Death,
+    /// Creative item palette with category tabs.
+    CreativeInventory,
+}
+
+impl Screen {
+    /// Screens with item slots.
+    pub fn has_slots(self) -> bool {
+        matches!(
+            self,
+            Screen::Inventory | Screen::CraftingTable | Screen::CreativeInventory
+        )
+    }
+}
+
+/// Device-agnostic pointer input (mouse now, touch later). Positions are in
+/// physical window pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PointerEvent {
+    Move(Vec2),
+    Down(Vec2, ClickButton),
+    Up(Vec2, ClickButton),
+    /// Scroll wheel / two-finger scroll, in lines (positive = up).
+    Scroll(Vec2, f32),
 }
 
 pub struct Ui {
@@ -56,14 +113,57 @@ pub struct Ui {
     /// GUI scale factor (each GUI pixel = `scale` physical pixels).
     pub scale: f32,
     pub hide_hud: bool,
+    /// Upper limit for the automatic GUI scale (0 = no limit).
+    pub max_gui_scale: u32,
+    pub(crate) skin: Skin,
+    pub(crate) font: Font,
+    pub(crate) icons: ItemIcons,
+    pub recipes: RecipeBook,
+    pub(crate) container: Container,
+    pub(crate) drag: Option<Drag>,
+    /// Cursor position in GUI pixels.
+    pub(crate) cursor: Vec2,
+    pub(crate) shift: bool,
+    pub(crate) pressed_button: Option<screens::ButtonId>,
+    pub(crate) tabs: Vec<creative::Tab>,
+    pub(crate) creative_tab: usize,
+    pub(crate) creative_scroll: usize,
+    pub(crate) scroll_drag: bool,
+    /// Items taken out of a closed screen, returned on the next input pass.
+    pending_return: Vec<ItemStack>,
+    textures_sent: bool,
+    pub(crate) hud_state: hud::HudState,
+    pub(crate) gui_size: Vec2,
+    /// "Respawn" was clicked; don't reopen the death screen until the game
+    /// reports the player alive.
+    pub(crate) respawn_requested: bool,
 }
 
 impl Ui {
-    pub fn new(_assets: &mc_assets::Assets) -> Self {
+    pub fn new(assets: &mc_assets::Assets) -> Self {
         Ui {
             screen: Screen::None,
             scale: 2.0,
             hide_hud: false,
+            max_gui_scale: 0,
+            skin: Skin::load(&assets.pack),
+            font: Font::load(&assets.pack),
+            icons: ItemIcons::build(assets),
+            recipes: RecipeBook::standard(),
+            container: Container::new(MenuKind::Inventory),
+            drag: None,
+            cursor: Vec2::new(-1000.0, -1000.0),
+            shift: false,
+            pressed_button: None,
+            tabs: creative::tabs(),
+            creative_tab: 0,
+            creative_scroll: 0,
+            scroll_drag: false,
+            pending_return: Vec::new(),
+            textures_sent: false,
+            hud_state: hud::HudState::default(),
+            gui_size: Vec2::new(640.0, 360.0),
+            respawn_requested: false,
         }
     }
 
@@ -72,8 +172,66 @@ impl Ui {
     }
 
     /// Open a screen (e.g. crafting table when the player right-clicks one).
+    /// Items in a previously open crafting grid / on the cursor are returned
+    /// to the inventory on the next [`Ui::handle_input`].
     pub fn open(&mut self, screen: Screen) {
+        if screen == self.screen {
+            return;
+        }
+        self.stash_container();
         self.screen = screen;
+        match screen {
+            Screen::Inventory => self.container.set_kind(MenuKind::Inventory),
+            Screen::CraftingTable => self.container.set_kind(MenuKind::CraftingTable),
+            Screen::CreativeInventory => self.container.set_kind(MenuKind::Creative),
+            _ => {}
+        }
+    }
+
+    /// Close the current screen.
+    pub fn close(&mut self) {
+        self.open(Screen::None);
+    }
+
+    /// Ask for the font/icon atlases to be uploaded again (e.g. after the
+    /// renderer lost its textures).
+    pub fn invalidate_textures(&mut self) {
+        self.textures_sent = false;
+    }
+
+    /// Slot state of the open screen (crafting grid, carried stack).
+    pub fn container(&self) -> &Container {
+        &self.container
+    }
+
+    pub fn container_mut(&mut self) -> &mut Container {
+        &mut self.container
+    }
+
+    /// The stack currently carried on the cursor.
+    pub fn carried(&self) -> Option<ItemStack> {
+        self.container.carried
+    }
+
+    fn stash_container(&mut self) {
+        self.drag = None;
+        self.scroll_drag = false;
+        self.pressed_button = None;
+        if let Some(c) = self.container.carried.take() {
+            self.pending_return.push(c);
+        }
+        for slot in self.container.craft.iter_mut() {
+            if let Some(s) = slot.take() {
+                self.pending_return.push(s);
+            }
+        }
+    }
+
+    fn update_scale(&mut self, w: f32, h: f32) {
+        if w > 0.0 && h > 0.0 {
+            self.scale = gui::auto_scale(w, h, self.max_gui_scale);
+            self.gui_size = Vec2::new((w / self.scale).floor(), (h / self.scale).floor());
+        }
     }
 
     /// Process input for open screens and the hotbar. Consumes the keys/clicks
@@ -82,32 +240,146 @@ impl Ui {
         &mut self,
         input: &mut InputState,
         inventory: &mut Inventory,
-        _hud: &HudInfo,
+        hud: &HudInfo,
     ) -> Vec<UiAction> {
-        if input.consume(Key::Inventory) {
-            self.screen = if self.screen_open() {
-                Screen::None
-            } else {
-                Screen::Inventory
-            };
+        let mut actions = Vec::new();
+        let (w, h) = input.window_size;
+        self.update_scale(w as f32, h as f32);
+        self.flush_returns(inventory, &mut actions);
+
+        if !hud.dead {
+            self.respawn_requested = false;
+            if self.screen == Screen::Death {
+                self.close();
+            }
+        } else if self.screen != Screen::Death && !self.respawn_requested {
+            self.open(Screen::Death);
         }
+        self.shift = input.held(Key::Shift);
+
+        // Screen toggles.
         if input.consume(Key::Escape) {
-            self.screen = if self.screen_open() {
-                Screen::None
-            } else {
-                Screen::Pause
-            };
-        }
-        for i in 0..9u8 {
-            if input.consume(Key::Hotbar(i)) {
-                inventory.selected = i as usize;
+            match self.screen {
+                Screen::Death => {}
+                Screen::None => self.open(Screen::Pause),
+                _ => self.close(),
             }
         }
-        if input.scroll != 0.0 && !self.screen_open() {
-            let n = inventory.selected as i32 - input.scroll.signum() as i32;
-            inventory.selected = n.rem_euclid(9) as usize;
+        if input.consume(Key::Inventory) {
+            match self.screen {
+                Screen::None => self.open(if hud.creative {
+                    Screen::CreativeInventory
+                } else {
+                    Screen::Inventory
+                }),
+                s if s.has_slots() => self.close(),
+                _ => {}
+            }
         }
-        Vec::new()
+
+        if !self.screen_open() {
+            for i in 0..9u8 {
+                if input.consume(Key::Hotbar(i)) {
+                    inventory.selected = i as usize;
+                }
+            }
+            if input.scroll != 0.0 {
+                let n = inventory.selected as i32 - input.scroll.signum() as i32;
+                inventory.selected = n.rem_euclid(9) as usize;
+            }
+            self.flush_returns(inventory, &mut actions);
+            return actions;
+        }
+
+        // Pointer input for screens.
+        let pos = Vec2::new(input.cursor_pos.0, input.cursor_pos.1);
+        self.pointer(PointerEvent::Move(pos), inventory, hud, &mut actions);
+        if input.scroll != 0.0 {
+            self.pointer(
+                PointerEvent::Scroll(pos, input.scroll),
+                inventory,
+                hud,
+                &mut actions,
+            );
+        }
+        for (mb, cb) in [
+            (MouseButton::Left, ClickButton::Primary),
+            (MouseButton::Right, ClickButton::Secondary),
+            (MouseButton::Middle, ClickButton::Middle),
+        ] {
+            if input.consume_mouse(mb) {
+                self.pointer(PointerEvent::Down(pos, cb), inventory, hud, &mut actions);
+            }
+        }
+        for (mb, cb) in [
+            (MouseButton::Left, ClickButton::Primary),
+            (MouseButton::Right, ClickButton::Secondary),
+            (MouseButton::Middle, ClickButton::Middle),
+        ] {
+            if input.mouse_released.remove(&mb) {
+                self.pointer(PointerEvent::Up(pos, cb), inventory, hud, &mut actions);
+            }
+        }
+
+        // Keys acting on the hovered slot.
+        if self.screen.has_slots() {
+            let hovered = self.hovered_slot(inventory, hud);
+            for i in 0..9u8 {
+                if input.consume(Key::Hotbar(i)) {
+                    if let (Some(s), None) = (hovered, self.container.carried) {
+                        self.container
+                            .swap_with_hotbar(inventory, &self.recipes, s, i as usize);
+                    }
+                }
+            }
+            if input.consume(Key::Drop) {
+                if let (Some(s), None) = (hovered, self.container.carried) {
+                    let whole = input.held(Key::Sprint);
+                    if let Some(d) = self.container.drop_from(inventory, &self.recipes, s, whole) {
+                        actions.push(UiAction::Drop(d));
+                    }
+                }
+            }
+        }
+        self.flush_returns(inventory, &mut actions);
+        actions
+    }
+
+    /// Feed one pointer event (mouse or touch) to the open screen.
+    pub fn pointer(
+        &mut self,
+        ev: PointerEvent,
+        inventory: &mut Inventory,
+        hud: &HudInfo,
+        actions: &mut Vec<UiAction>,
+    ) {
+        let to_gui = |p: Vec2, s: f32| p / s;
+        match ev {
+            PointerEvent::Move(p) => {
+                self.cursor = to_gui(p, self.scale);
+                self.pointer_move(inventory, hud);
+            }
+            PointerEvent::Down(p, b) => {
+                self.cursor = to_gui(p, self.scale);
+                self.pointer_down(inventory, hud, b, actions);
+            }
+            PointerEvent::Up(p, b) => {
+                self.cursor = to_gui(p, self.scale);
+                self.pointer_up(inventory, hud, b, actions);
+            }
+            PointerEvent::Scroll(p, amount) => {
+                self.cursor = to_gui(p, self.scale);
+                self.scroll(amount);
+            }
+        }
+    }
+
+    fn flush_returns(&mut self, inventory: &mut Inventory, actions: &mut Vec<UiAction>) {
+        for s in self.pending_return.drain(..) {
+            if let Some(rest) = inventory.add(s) {
+                actions.push(UiAction::Drop(rest));
+            }
+        }
     }
 
     /// Build this frame's draw list.
@@ -117,42 +389,35 @@ impl Ui {
         screen_w: f32,
         screen_h: f32,
         inventory: &Inventory,
-        _hud: &HudInfo,
+        hud: &HudInfo,
     ) {
-        // Crosshair.
-        let (cx, cy) = (screen_w / 2.0, screen_h / 2.0);
-        out.push(UiQuad::solid(
-            cx - 9.0,
-            cy - 1.0,
-            18.0,
-            2.0,
-            [1.0, 1.0, 1.0, 0.8],
-        ));
-        out.push(UiQuad::solid(
-            cx - 1.0,
-            cy - 9.0,
-            2.0,
-            18.0,
-            [1.0, 1.0, 1.0, 0.8],
-        ));
-        // Placeholder hotbar.
-        let slot = 20.0 * self.scale;
-        let x0 = cx - slot * 4.5;
-        let y0 = screen_h - slot - 4.0;
-        for i in 0..9 {
-            let c = if i == inventory.selected {
-                [1.0, 1.0, 1.0, 0.6]
-            } else {
-                [0.0, 0.0, 0.0, 0.5]
-            };
-            out.push(UiQuad::solid(
-                x0 + i as f32 * slot + 2.0,
-                y0 + 2.0,
-                slot - 4.0,
-                slot - 4.0,
-                c,
-            ));
+        self.update_scale(screen_w, screen_h);
+        if !self.textures_sent {
+            out.upload
+                .push((self.font.key.clone(), self.font.atlas.clone()));
+            out.upload
+                .push((self.icons.key.clone(), self.icons.atlas.clone()));
+            self.textures_sent = true;
         }
-        out.dim_world = self.screen_open();
+        self.hud_state.update(inventory, hud);
+        let mut p = Painter::new(out, self.scale);
+        let open = self.screen != Screen::None;
+        if !self.hide_hud {
+            // Under a screen the HUD is drawn darkened, like the world.
+            let dim = if open { 0.25 } else { 1.0 };
+            self.draw_hud(&mut p, inventory, hud, dim, !open);
+        }
+        if open {
+            self.draw_screen(&mut p, inventory, hud);
+        }
+        out.dim_world = open;
+    }
+
+    /// Display name of an item (for tooltips).
+    pub fn item_name(item: ItemId) -> &'static str {
+        item.display()
     }
 }
+
+#[cfg(test)]
+mod tests;

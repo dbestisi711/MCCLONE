@@ -504,6 +504,11 @@ define_blocks! {
         d.solid = true; d
     },
     VINE => { let mut d = plant("vine", "vine", "Vines").tint(Tint::Foliage); d.replaceable = true; d.needs_support = false; d },
+    JUNGLE_PLANKS => wood("jungle_planks", "jungle_planks", "Jungle Planks"),
+    ACACIA_PLANKS => wood("acacia_planks", "acacia_planks", "Acacia Planks"),
+    DARK_OAK_PLANKS => wood("dark_oak_planks", "dark_oak_planks", "Dark Oak Planks"),
+    CHERRY_PLANKS => wood("cherry_planks", "cherry_planks", "Cherry Planks"),
+    MANGROVE_PLANKS => wood("mangrove_planks", "mangrove_planks", "Mangrove Planks"),
 }
 
 #[cfg(test)]
