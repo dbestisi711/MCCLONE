@@ -97,7 +97,7 @@ impl Ui {
         self.palette_rows().saturating_sub(PALETTE_ROWS)
     }
 
-    pub(crate) fn layout(&self, hud: &HudInfo) -> Layout {
+    pub(crate) fn layout(&self) -> Layout {
         let (gw, gh) = (self.gui_size.x, self.gui_size.y);
         let mut l = Layout::default();
         let center = |w: f32, h: f32| [((gw - w) / 2.0).floor(), ((gh - h) / 2.0).floor(), w, h];
@@ -285,12 +285,11 @@ impl Ui {
             }
             Screen::None => {}
         }
-        let _ = hud;
         l
     }
 
-    pub(crate) fn hovered_slot(&self, _inv: &Inventory, hud: &HudInfo) -> Option<SlotId> {
-        self.layout(hud).slot_at(self.cursor).map(|s| s.id)
+    pub(crate) fn hovered_slot(&self) -> Option<SlotId> {
+        self.layout().slot_at(self.cursor).map(|s| s.id)
     }
 
     pub(crate) fn scroll(&mut self, amount: f32) {
@@ -311,8 +310,8 @@ impl Ui {
         self.creative_scroll = (t * max as f32).round() as usize;
     }
 
-    pub(crate) fn pointer_move(&mut self, inv: &mut Inventory, hud: &HudInfo) {
-        let lay = self.layout(hud);
+    pub(crate) fn pointer_move(&mut self, inv: &mut Inventory) {
+        let lay = self.layout();
         if self.scroll_drag
             && let Some(track) = lay.scrollbar
         {
@@ -335,7 +334,7 @@ impl Ui {
         button: ClickButton,
         actions: &mut Vec<UiAction>,
     ) {
-        let lay = self.layout(hud);
+        let lay = self.layout();
         if let Some(b) = lay.button_at(self.cursor) {
             if button == ClickButton::Primary {
                 self.pressed_button = Some(b);
@@ -453,8 +452,8 @@ impl Ui {
     // Drawing
     // ------------------------------------------------------------------
 
-    pub(crate) fn draw_screen(&self, p: &mut Painter, inv: &Inventory, hud: &HudInfo) {
-        let lay = self.layout(hud);
+    pub(crate) fn draw_screen(&self, p: &mut Painter, inv: &Inventory) {
+        let lay = self.layout();
         let (gw, gh) = (self.gui_size.x, self.gui_size.y);
         match self.screen {
             Screen::Pause => {
@@ -482,7 +481,7 @@ impl Ui {
             | Screen::CraftingTable
             | Screen::CreativeInventory
             | Screen::Furnace => {
-                self.draw_container(p, inv, hud, &lay);
+                self.draw_container(p, inv, &lay);
             }
             Screen::None => {}
         }
@@ -529,7 +528,7 @@ impl Ui {
         );
     }
 
-    fn draw_container(&self, p: &mut Painter, inv: &Inventory, hud: &HudInfo, lay: &Layout) {
+    fn draw_container(&self, p: &mut Painter, inv: &Inventory, lay: &Layout) {
         let Some([x0, y0, pw, ph]) = lay.panel else {
             return;
         };
@@ -661,10 +660,9 @@ impl Ui {
         {
             self.draw_tooltip_text(p, &[tab.name]);
         }
-        let _ = hud;
     }
 
-    fn draw_slot_frame(&self, p: &mut Painter, s: &SlotPos, _inv: &Inventory) {
+    fn draw_slot_frame(&self, p: &mut Painter, s: &SlotPos, inv: &Inventory) {
         let (x, y) = (s.x, s.y);
         if s.big {
             p.nine(&self.skin.slot, x - 4.0, y - 4.0, 24.0, 24.0, WHITE);
@@ -680,8 +678,8 @@ impl Ui {
         };
         if let Some(icon) = empty_icon {
             let empty = match s.id {
-                SlotId::Armor(i) => _inv.armor[i as usize].is_none(),
-                SlotId::Offhand => _inv.offhand.is_none(),
+                SlotId::Armor(i) => inv.armor[i as usize].is_none(),
+                SlotId::Offhand => inv.offhand.is_none(),
                 _ => true,
             };
             if empty && icon.ok {

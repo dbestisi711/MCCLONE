@@ -332,11 +332,10 @@ impl Ui {
         self.update_scale(w as f32, h as f32);
         self.flush_returns(inventory, &mut actions);
 
+        // The death screen opens when the player dies and only closes through
+        // its Respawn button.
         if !hud.dead {
             self.respawn_requested = false;
-            if self.screen == Screen::Death {
-                self.close();
-            }
         } else if self.screen != Screen::Death && !self.respawn_requested {
             self.open(Screen::Death);
         }
@@ -408,7 +407,7 @@ impl Ui {
 
         // Keys acting on the hovered slot.
         if self.screen.has_slots() {
-            let hovered = self.hovered_slot(inventory, hud);
+            let hovered = self.hovered_slot();
             for i in 0..9u8 {
                 if input.consume(Key::Hotbar(i))
                     && let (Some(s), None) = (hovered, self.container.carried)
@@ -442,7 +441,7 @@ impl Ui {
         match ev {
             PointerEvent::Move(p) => {
                 self.cursor = to_gui(p, self.scale);
-                self.pointer_move(inventory, hud);
+                self.pointer_move(inventory);
             }
             PointerEvent::Down(p, b) => {
                 self.cursor = to_gui(p, self.scale);
@@ -496,7 +495,7 @@ impl Ui {
             self.draw_hud(&mut p, inventory, hud, dim, !open);
         }
         if open {
-            self.draw_screen(&mut p, inventory, hud);
+            self.draw_screen(&mut p, inventory);
         }
         out.dim_world = open;
     }

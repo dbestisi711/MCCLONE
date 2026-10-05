@@ -43,8 +43,8 @@ fn hud() -> HudInfo {
 }
 
 /// Physical position of a slot's centre.
-fn slot_center(ui: &Ui, hud: &HudInfo, id: SlotId) -> (f32, f32) {
-    let l = ui.layout(hud);
+fn slot_center(ui: &Ui, id: SlotId) -> (f32, f32) {
+    let l = ui.layout();
     let s = l.slots.iter().find(|s| s.id == id).expect("slot on screen");
     ((s.x + 8.0) * ui.scale, (s.y + 8.0) * ui.scale)
 }
@@ -75,7 +75,7 @@ fn click_slot(
     id: SlotId,
     b: MouseButton,
 ) -> Vec<UiAction> {
-    let pos = slot_center(ui, hud, id);
+    let pos = slot_center(ui, id);
     click(ui, inv, hud, pos, b)
 }
 
@@ -171,7 +171,7 @@ fn mouse_crafting_flow() {
     // Shift-click the result.
     let mut i = input(1280, 720);
     i.held.insert(Key::Shift);
-    i.cursor_pos = slot_center(&ui, &h, SlotId::Result);
+    i.cursor_pos = slot_center(&ui, SlotId::Result);
     i.mouse_pressed.insert(MouseButton::Left);
     ui.handle_input(&mut i, &mut inv, &h);
     assert_eq!(inv.count_of(ItemId::by_name("oak_planks").unwrap()), 4);
@@ -207,7 +207,7 @@ fn drag_spreads_stack() {
     ui.handle_input(&mut input(1280, 720), &mut inv, &h);
     ui.container.carried = Some(st("dirt", 9));
     let targets = [SlotId::Inv(9), SlotId::Inv(10), SlotId::Inv(11)];
-    let p0 = slot_center(&ui, &h, targets[0]);
+    let p0 = slot_center(&ui, targets[0]);
     let mut i = input(1280, 720);
     i.cursor_pos = p0;
     i.mouse_pressed.insert(MouseButton::Left);
@@ -215,12 +215,12 @@ fn drag_spreads_stack() {
     ui.handle_input(&mut i, &mut inv, &h);
     for t in &targets[1..] {
         let mut i = input(1280, 720);
-        i.cursor_pos = slot_center(&ui, &h, *t);
+        i.cursor_pos = slot_center(&ui, *t);
         i.mouse_held.insert(MouseButton::Left);
         ui.handle_input(&mut i, &mut inv, &h);
     }
     let mut i = input(1280, 720);
-    i.cursor_pos = slot_center(&ui, &h, targets[2]);
+    i.cursor_pos = slot_center(&ui, targets[2]);
     i.mouse_released.insert(MouseButton::Left);
     ui.handle_input(&mut i, &mut inv, &h);
     for t in [9, 10, 11] {
@@ -236,7 +236,7 @@ fn pause_and_death_buttons() {
     let h = hud();
     ui.open(Screen::Pause);
     ui.handle_input(&mut input(1280, 720), &mut inv, &h);
-    let l = ui.layout(&h);
+    let l = ui.layout();
     let quit = l
         .buttons
         .iter()
@@ -261,7 +261,7 @@ fn pause_and_death_buttons() {
     press(&mut i, Key::Escape);
     ui.handle_input(&mut i, &mut inv, &dead);
     assert_eq!(ui.screen, Screen::Death);
-    let l = ui.layout(&dead);
+    let l = ui.layout();
     let r = l
         .buttons
         .iter()
@@ -285,7 +285,7 @@ fn creative_tabs_scroll_and_take() {
     ui.open(Screen::CreativeInventory);
     let mut i = input(1280, 720);
     ui.handle_input(&mut i, &mut inv, &h);
-    let l = ui.layout(&h);
+    let l = ui.layout();
     let first = l
         .slots
         .iter()
@@ -310,11 +310,11 @@ fn creative_tabs_scroll_and_take() {
     ui.handle_input(&mut i, &mut inv, &h);
     assert!(ui.creative_scroll <= ui.max_scroll_for_tests());
     // Switch tabs by clicking.
-    let (tab, r) = ui.layout(&h).tabs[INV_TAB];
+    let (tab, r) = ui.layout().tabs[INV_TAB];
     let pos = ((r[0] + 13.0) * ui.scale, (r[1] + 13.0) * ui.scale);
     click(&mut ui, &mut inv, &h, pos, MouseButton::Left);
     assert_eq!(ui.creative_tab, tab);
-    assert!(ui.layout(&h).slots.iter().any(|s| s.id == SlotId::Inv(20)));
+    assert!(ui.layout().slots.iter().any(|s| s.id == SlotId::Inv(20)));
 }
 
 const INV_TAB: usize = creative::INVENTORY_TAB;
