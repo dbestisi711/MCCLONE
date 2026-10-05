@@ -40,6 +40,7 @@ log = "0.4"
 env_logger = "0.11"
 fontdue = "0.9"
 rand = "0.9"
+web-time = "1"
 
 # Debug builds are unplayably slow for a voxel game; optimise dependencies and
 # give our own crates a moderate level so `cargo run` stays usable.

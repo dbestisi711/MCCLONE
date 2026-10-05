@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "mcclone"
 path = "src/main.rs"
@@ -17,8 +20,19 @@ mc-ui.workspace = true
 mc-render.workspace = true
 glam.workspace = true
 winit.workspace = true
-pollster.workspace = true
 log.workspace = true
+web-time.workspace = true
+rustc-hash.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
 env_logger.workspace = true
 png = "0.18"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Location", "Response"] }
+console_error_panic_hook = "0.1"
+console_log = "1"

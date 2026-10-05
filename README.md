@@ -19,6 +19,27 @@ libraries (`libxkbcommon-x11-0` on Debian/Ubuntu).
 Useful options: `--seed N`, `--rd N` (render distance in chunks), `--survival`.
 `--screenshot out.png` renders one frame headlessly and exits.
 
+## Web version (browser, iPad)
+
+The game also runs in the browser through WebAssembly and WebGPU (Chrome,
+Edge, and Safari on macOS/iPadOS 26+). Build it into `web/dist`:
+
+```
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129   # must match Cargo.lock
+./web/build.sh --serve                             # http://localhost:8080
+```
+
+`web/dist` is a static site (`index.html`, the wasm module and `pack.bin`, a
+~6 MB bundle of the pack files the game uses), so any static host works. The
+`Deploy web build to GitHub Pages` workflow builds and publishes it when run by
+hand from the Actions tab (enable Pages with "GitHub Actions" as the source
+first). URL options: `?seed=42&rd=8&survival`.
+
+On touch screens the game shows on-screen controls: a movement stick on the
+left, drag on the right to look, tap to place/use, hold to break, and buttons
+for jump, sneak, inventory and pause. Tap the hotbar to pick a slot.
+
 ## Controls
 
 | Key | Action |

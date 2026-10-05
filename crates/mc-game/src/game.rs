@@ -135,11 +135,19 @@ pub struct Game {
 }
 
 impl Game {
+    /// Find the resource pack on disk and start a game (desktop).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(options: Options) -> Self {
         let pack = Pack::find()
             .expect("could not find the resource pack (set MC_PACK_DIR to the repo root)");
         log::info!("resource pack: {}", pack.root.display());
-        let t0 = std::time::Instant::now();
+        Self::with_pack(options, pack)
+    }
+
+    /// Start a game using an already opened pack (the web build passes an
+    /// in-memory bundle).
+    pub fn with_pack(options: Options, pack: Pack) -> Self {
+        let t0 = web_time::Instant::now();
         let assets = Arc::new(Assets::load(pack));
         log::info!("assets loaded in {:?}", t0.elapsed());
         let generator = Arc::new(WorldGenerator::new(options.seed));
@@ -796,6 +804,7 @@ impl FpsCounter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Headless mode: generate the world around the player, render one frame
 /// offscreen (works with a software Vulkan driver), and save it as PNG.
 /// With `--scene` a test structure is built first; with `--bench N` the
@@ -807,7 +816,7 @@ pub fn run_screenshot(options: &Options, path: &str) {
     }
     let mut game = Game::new(options.clone());
     let center = ChunkPos::from_world(game.player.position);
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     let (gen0, lit0) = (
         game.streamer.stats.generated_total,
         game.streamer.stats.lit_total,
@@ -896,7 +905,7 @@ pub fn run_screenshot(options: &Options, path: &str) {
             let mut cpu = 0.0;
             let mut times = Vec::with_capacity(options.bench as usize);
             for _ in 0..options.bench {
-                let t = std::time::Instant::now();
+                let t = web_time::Instant::now();
                 renderer.render(&game.world, &frame);
                 renderer.wait_gpu();
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -927,6 +936,7 @@ pub fn run_screenshot(options: &Options, path: &str) {
     log::info!("saved {path}");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// `--stream N`: exercise the asynchronous paths (generation, lighting,
 /// meshing with upload budgets) the way the interactive game does: start
 /// with only the spawn area, fly forward for N simulated frames at 20 m/s
@@ -947,7 +957,7 @@ fn run_stream_test(options: &Options, path: &str) {
         .unwrap_or(64);
     game.player.position.y = ground as f32 + 12.0;
     game.player.prev_position = game.player.position;
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let mut update_ms: Vec<f64> = Vec::new();
     let mut render_ms: Vec<f64> = Vec::new();
     let dir = game.player.look_dir() * glam::Vec3::new(1.0, 0.0, 1.0);
@@ -960,9 +970,9 @@ fn run_stream_test(options: &Options, path: &str) {
             game.player.position += dir;
             game.player.prev_position = game.player.position;
         }
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let frame = game.frame(0.05);
-        let t1 = std::time::Instant::now();
+        let t1 = web_time::Instant::now();
         renderer.render(&game.world, &frame);
         renderer.wait_gpu();
         update_ms.push((t1 - t).as_secs_f64() * 1000.0);
@@ -1016,6 +1026,7 @@ fn run_stream_test(options: &Options, path: &str) {
     log::info!("saved {path}");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_png(path: &str, img: &mc_core::Rgba8Image) {
     let file = std::fs::File::create(path).expect("create screenshot file");
     let w = std::io::BufWriter::new(file);

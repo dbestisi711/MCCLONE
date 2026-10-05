@@ -69,7 +69,13 @@
 //! [`Pack::load_texture`], which makes such masks opaque; then alpha-test
 //! (discard alpha < 0.5) and the result matches the game.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use rustc_hash::FxHashMap as HashMap;
 
 use mc_core::{BlockId, Rgba8Image};
 
@@ -84,10 +90,17 @@ pub use image_ops::{generate_mips, magenta_checker, resize_nearest};
 pub use items::{BLOCK_ICON_SIZE, ItemIcons};
 pub use models::{Bone, ClientEntity, Cube, EntityModel, EntityModels, FaceUv, ModelVertex};
 
-/// Handle to the resource pack directory.
+/// Handle to the resource pack: a directory on disk (desktop) or an
+/// in-memory bundle of files (web, see [`Pack::from_bundle`]).
 #[derive(Clone, Debug)]
 pub struct Pack {
+    /// Directory the pack was opened from (empty for in-memory packs).
     pub root: PathBuf,
+    /// In-memory files keyed by pack-relative path with `/` separators.
+    files: Option<Arc<HashMap<String, Arc<[u8]>>>>,
+    /// When set, every file that is successfully read is recorded here (used
+    /// by the web bundler to find out which files the game needs).
+    access_log: Option<Arc<Mutex<BTreeSet<String>>>>,
 }
 
 /// Image file formats the pack uses.
@@ -97,13 +110,90 @@ pub enum ImageFormat {
     Tga,
 }
 
+/// Magic header of a pack bundle file.
+const BUNDLE_MAGIC: &[u8; 8] = b"MCPACK01";
+
 impl Pack {
     pub fn open(root: impl Into<PathBuf>) -> Self {
-        Pack { root: root.into() }
+        Pack {
+            root: root.into(),
+            files: None,
+            access_log: None,
+        }
+    }
+
+    /// Pack backed by in-memory files (pack-relative path → contents).
+    pub fn from_files(files: HashMap<String, Arc<[u8]>>) -> Self {
+        Pack {
+            root: PathBuf::new(),
+            files: Some(Arc::new(files)),
+            access_log: None,
+        }
+    }
+
+    /// Parse a bundle produced by [`Pack::write_bundle`].
+    pub fn from_bundle(bytes: &[u8]) -> Result<Self, String> {
+        let mut r = bytes;
+        let mut take = |n: usize| -> Result<&[u8], String> {
+            if r.len() < n {
+                return Err("truncated pack bundle".into());
+            }
+            let (a, b) = r.split_at(n);
+            r = b;
+            Ok(a)
+        };
+        if take(8)? != BUNDLE_MAGIC {
+            return Err("not a pack bundle".into());
+        }
+        let u32_at = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        let count = u32_at(take(4)?);
+        let mut files = HashMap::default();
+        for _ in 0..count {
+            let n = u32_at(take(4)?);
+            let name = String::from_utf8(take(n)?.to_vec()).map_err(|e| e.to_string())?;
+            let n = u32_at(take(4)?);
+            files.insert(name, Arc::from(take(n)?));
+        }
+        Ok(Self::from_files(files))
+    }
+
+    /// Serialise the given pack-relative files (read from this pack) into a
+    /// bundle for [`Pack::from_bundle`]. Missing files are skipped.
+    pub fn write_bundle<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
+        let mut entries = Vec::new();
+        for p in paths {
+            if let Some(data) = self.read_bytes(p) {
+                entries.push((p.to_string(), data));
+            }
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(BUNDLE_MAGIC);
+        out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (name, data) in entries {
+            out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&data);
+        }
+        out
+    }
+
+    /// Start recording every file read through this pack (and its clones).
+    pub fn record_access(&mut self) -> Arc<Mutex<BTreeSet<String>>> {
+        let log = Arc::new(Mutex::new(BTreeSet::new()));
+        self.access_log = Some(log.clone());
+        log
+    }
+
+    fn note(&self, rel: &str) {
+        if let Some(log) = &self.access_log {
+            log.lock().unwrap().insert(rel.to_string());
+        }
     }
 
     /// Locate the pack: `$MC_PACK_DIR`, else walk up from the current dir and
     /// the executable's dir looking for `blocks.json` + `textures/`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn find() -> Option<Pack> {
         if let Ok(p) = std::env::var("MC_PACK_DIR") {
             return Some(Pack::open(p));
@@ -135,22 +225,57 @@ impl Pack {
         self.root.join(rel)
     }
 
+    /// Normalise a pack-relative path for in-memory lookups.
+    fn key(rel: &str) -> String {
+        rel.trim_start_matches("./").replace('\\', "/")
+    }
+
+    /// Read a whole file.
+    pub fn read_bytes(&self, rel: &str) -> Option<Arc<[u8]>> {
+        let data = match &self.files {
+            Some(files) => files.get(&Self::key(rel)).cloned(),
+            None => std::fs::read(self.root.join(rel)).ok().map(Arc::from),
+        };
+        if data.is_some() {
+            self.note(rel);
+        }
+        data
+    }
+
     /// Does a pack-relative file exist?
     pub fn exists(&self, rel: &str) -> bool {
-        self.root.join(rel).is_file()
+        match &self.files {
+            Some(files) => files.contains_key(&Self::key(rel)),
+            None => self.root.join(rel).is_file(),
+        }
     }
 
     /// Pack-relative paths (with `/` separators) of the files directly inside
     /// `rel_dir` whose name ends with `suffix`, sorted.
     pub fn list_files(&self, rel_dir: &str, suffix: &str) -> Vec<String> {
+        let dir = rel_dir.trim_end_matches('/');
         let mut out = Vec::new();
-        let Ok(rd) = std::fs::read_dir(self.root.join(rel_dir)) else {
-            return out;
-        };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.ends_with(suffix) && e.path().is_file() {
-                out.push(format!("{}/{}", rel_dir.trim_end_matches('/'), name));
+        match &self.files {
+            Some(files) => {
+                let prefix = format!("{dir}/");
+                for k in files.keys() {
+                    if let Some(name) = k.strip_prefix(&prefix) {
+                        if !name.contains('/') && name.ends_with(suffix) {
+                            out.push(k.clone());
+                        }
+                    }
+                }
+            }
+            None => {
+                let Ok(rd) = std::fs::read_dir(self.root.join(rel_dir)) else {
+                    return out;
+                };
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name.ends_with(suffix) && e.path().is_file() {
+                        out.push(format!("{dir}/{name}"));
+                    }
+                }
             }
         }
         out.sort();
@@ -160,26 +285,30 @@ impl Pack {
     /// Resolve an image path. With an explicit `.png`/`.tga` extension that
     /// file is used; otherwise `<rel>.png` and `<rel>.tga` are tried in the
     /// given order.
-    fn image_path(&self, rel: &str, prefer_tga: bool) -> Option<(PathBuf, ImageFormat)> {
+    fn image_path(&self, rel: &str, prefer_tga: bool) -> Option<(String, ImageFormat)> {
         let lower = rel.to_ascii_lowercase();
         if lower.ends_with(".png") || lower.ends_with(".tga") {
-            let p = self.root.join(rel);
             let fmt = if lower.ends_with(".tga") {
                 ImageFormat::Tga
             } else {
                 ImageFormat::Png
             };
-            return p.is_file().then_some((p, fmt));
+            return self.exists(rel).then(|| (rel.to_string(), fmt));
         }
-        let png = (self.root.join(format!("{rel}.png")), ImageFormat::Png);
-        let tga = (self.root.join(format!("{rel}.tga")), ImageFormat::Tga);
+        let png = (format!("{rel}.png"), ImageFormat::Png);
+        let tga = (format!("{rel}.tga"), ImageFormat::Tga);
         let order = if prefer_tga { [tga, png] } else { [png, tga] };
-        order.into_iter().find(|(p, _)| p.is_file())
+        order.into_iter().find(|(p, _)| self.exists(p))
     }
 
     /// Decode an image file into RGBA8.
-    fn decode(path: &Path) -> Option<Rgba8Image> {
-        match image::open(path) {
+    fn decode(&self, rel: &str, fmt: ImageFormat) -> Option<Rgba8Image> {
+        let bytes = self.read_bytes(rel)?;
+        let format = match fmt {
+            ImageFormat::Png => image::ImageFormat::Png,
+            ImageFormat::Tga => image::ImageFormat::Tga,
+        };
+        match image::load_from_memory_with_format(&bytes, format) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 Some(Rgba8Image {
@@ -189,7 +318,7 @@ impl Pack {
                 })
             }
             Err(e) => {
-                log::warn!("failed to decode {}: {e}", path.display());
+                log::warn!("failed to decode {rel}: {e}");
                 None
             }
         }
@@ -207,7 +336,7 @@ impl Pack {
     /// loading prefers TGA.
     pub fn load_image_ext(&self, rel: &str, prefer_tga: bool) -> Option<(Rgba8Image, ImageFormat)> {
         let (path, fmt) = self.image_path(rel, prefer_tga)?;
-        Self::decode(&path).map(|img| (img, fmt))
+        self.decode(&path, fmt).map(|img| (img, fmt))
     }
 
     /// Load a texture for rendering (entity textures, GUI images...): like
@@ -229,12 +358,14 @@ impl Pack {
 
     /// Read a text file.
     pub fn read_string(&self, rel: &str) -> Option<String> {
-        std::fs::read_to_string(self.root.join(rel)).ok()
+        let bytes = self.read_bytes(rel)?;
+        String::from_utf8(bytes.to_vec()).ok()
     }
 
     pub fn load_json(&self, rel: &str) -> Option<serde_json::Value> {
-        mc_core::json::load_lenient(&self.root.join(rel))
-            .map_err(|e| log::warn!("{e}"))
+        let s = self.read_string(rel)?;
+        mc_core::json::parse_lenient(&s)
+            .map_err(|e| log::warn!("{rel}: {e}"))
             .ok()
     }
 }
@@ -324,7 +455,7 @@ pub struct Assets {
 impl Assets {
     pub fn load(pack: Pack) -> Assets {
         #[cfg(not(target_arch = "wasm32"))]
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let index = blocks::PackIndex::load(&pack);
         let colormaps = ColorMaps::load(&pack);
         let blocks = blocks::load_block_textures_with(&pack, &index, &colormaps);

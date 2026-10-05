@@ -3,3 +3,4 @@
 **/target
 /screenshots/*.tmp
 .claude/worktrees/
+/web/dist/

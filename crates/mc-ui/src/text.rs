@@ -57,14 +57,14 @@ impl Font {
     /// Load the TTF from the pack. Falls back to simple block glyphs when the
     /// font is missing so the UI still shows something.
     pub fn load(pack: &mc_assets::Pack) -> Font {
-        let path = pack.path("font/minecraft-ten.ttf");
-        let font = std::fs::read(&path)
-            .ok()
-            .and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok());
+        let path = "font/minecraft-ten.ttf";
+        let font = pack
+            .read_bytes(path)
+            .and_then(|b| fontdue::Font::from_bytes(&*b, fontdue::FontSettings::default()).ok());
         match font {
             Some(f) => Self::from_fontdue(&f),
             None => {
-                log::warn!("ui: could not load {}, using block glyphs", path.display());
+                log::warn!("ui: could not load {path}, using block glyphs");
                 Self::fallback()
             }
         }

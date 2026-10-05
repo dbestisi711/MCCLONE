@@ -21,7 +21,7 @@ cargo test --workspace
 | `mc-worldgen` | terrain | deterministic, thread-safe `WorldGenerator::generate(ChunkPos) -> Chunk`: noise terrain, biomes, caves, aquifers, ores, trees and vegetation |
 | `mc-entity` | mobs & physics | `Player` controller and AABB-vs-voxel physics, `EntityManager` (mobs, AI, pathfinding, spawning, dropped items, combat), procedural animation → `EntityRenderInstance` |
 | `mc-render` | optimization & visuals | wgpu renderer, chunk meshing on worker threads, `ChunkStreamer` (async generation, load/unload), culling, lighting, sky/fog/clouds/water, entity and UI drawing |
-| `mc-game` | integration | window, input mapping, fixed 20 TPS loop, block breaking/placing, screenshot mode |
+| `mc-game` | integration | window/event loop shared by desktop and web (`app.rs`), touch controls, input mapping, fixed 20 TPS loop, block breaking/placing, screenshot mode, web pack bundler (`examples/bundle_web.rs`) |
 
 Dependency direction: `mc-core` ← `mc-assets` ← (`mc-ui`, `mc-render`), `mc-core` ← (`mc-worldgen`, `mc-entity`), and `mc-game` depends on all of them.
 
@@ -34,3 +34,12 @@ Dependency direction: `mc-core` ← `mc-assets` ← (`mc-ui`, `mc-render`), `mc-
 - Bedrock JSON contains comments. Parse it with `mc_core::json::parse_lenient`.
 - Texture keys are pack-relative paths without extension (`"textures/entity/pig/pig"`), or `@white` / `@blocks` / `@<dynamic>`.
 - Game frame order: UI input → mouse look → fixed ticks (player, entities, time) → interaction → streaming → `FrameData` → render.
+
+## Web build
+
+`web/build.sh` compiles `mc-game` as a wasm library (`wasm-bindgen`
+entry point in `app.rs`) and bundles the pack files the game reads into
+`pack.bin`. On the web, `Pack::from_bundle` serves those files from memory,
+the renderer is created asynchronously (`Renderer::new_async`), and
+`mc-render/src/tasks.rs` runs background jobs inline because there are no
+threads.

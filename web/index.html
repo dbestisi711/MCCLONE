@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>MCCLONE</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1f; }
+  canvas { display: block; width: 100vw !important; height: 100vh !important; outline: none; touch-action: none; }
+  #status {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #e8e8e8; font: 16px system-ui, sans-serif; pointer-events: none; text-align: center; padding: 16px;
+  }
+  #status:empty { display: none; }
+  #hint {
+    position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+    color: #ddd; font: 13px system-ui, sans-serif; opacity: .75; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="status">Loading…</div>
+<div id="hint">Click to capture the mouse · WASD to move · E inventory · Esc to pause</div>
+<script type="module">
+  import init from "./mc_game.js";
+  const status = document.getElementById("status");
+  setTimeout(() => document.getElementById("hint").remove(), 15000);
+  init().catch((e) => {
+    // winit uses an exception for control flow on the web; ignore that one.
+    if (!String(e).includes("Using exceptions for control flow")) {
+      console.error(e);
+      status.textContent = "Failed to start: " + e;
+    }
+  });
+  window.addEventListener("error", (e) => { if (status.textContent) status.textContent = "Error: " + e.message; });
+</script>
+</body>
+</html>

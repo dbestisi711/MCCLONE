@@ -136,6 +136,7 @@ pub fn clock() -> f64 {
     0.0
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Target {
     Window {
         surface: wgpu::Surface<'static>,
@@ -287,7 +288,7 @@ pub struct Renderer {
     clear_color: wgpu::Color,
 }
 
-fn request_device(adapter: &wgpu::Adapter, layers: u32) -> (wgpu::Device, wgpu::Queue, u32) {
+async fn request_device(adapter: &wgpu::Adapter, layers: u32) -> (wgpu::Device, wgpu::Queue, u32) {
     let alim = adapter.limits();
     let mut limits = wgpu::Limits::default();
     let max_layers = alim
@@ -296,31 +297,49 @@ fn request_device(adapter: &wgpu::Adapter, layers: u32) -> (wgpu::Device, wgpu::
     limits.max_texture_array_layers = layers
         .clamp(256, max_layers)
         .min(alim.max_texture_array_layers.max(256));
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("mcclone"),
-        required_limits: limits.clone(),
-        ..Default::default()
-    }))
-    .expect("request device");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("mcclone"),
+            required_limits: limits.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("request device");
     (device, queue, limits.max_texture_array_layers)
 }
 
 impl Renderer {
-    /// Create a renderer drawing into a window.
+    /// Create a renderer drawing into a window (blocking; desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(window: Arc<Window>, assets: Arc<Assets>) -> Self {
+        pollster::block_on(Self::new_async(window, assets))
+    }
+
+    /// Create a renderer drawing into a window. On the web this must be
+    /// awaited (adapter/device requests are asynchronous in browsers).
+    pub async fn new_async(window: Arc<Window>, assets: Arc<Assets>) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // Prefer WebGPU, fall back to WebGL2 when the browser lacks it.
+        #[cfg(target_arch = "wasm32")]
+        let instance = wgpu::util::new_instance_with_webgpu_detection(
+            wgpu::InstanceDescriptor::new_without_display_handle(),
+        )
+        .await;
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("no GPU adapter");
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            })
+            .await
+            .expect("no GPU adapter");
         let tiles = textures::build_tileset(&assets);
-        let (device, queue, max_layers) = request_device(&adapter, tiles.mips.len() as u32);
+        let (device, queue, max_layers) = request_device(&adapter, tiles.mips.len() as u32).await;
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -353,6 +372,7 @@ impl Renderer {
     }
 
     /// Create a headless renderer (uses any adapter, including software ones like lavapipe).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_offscreen(assets: Arc<Assets>, width: u32, height: u32) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -363,7 +383,8 @@ impl Renderer {
         }))
         .expect("no GPU adapter");
         let tiles = textures::build_tileset(&assets);
-        let (device, queue, max_layers) = request_device(&adapter, tiles.mips.len() as u32);
+        let (device, queue, max_layers) =
+            pollster::block_on(request_device(&adapter, tiles.mips.len() as u32));
         let texture = Self::make_offscreen(&device, width, height);
         let info = adapter.get_info();
         let target = Target::Offscreen {
