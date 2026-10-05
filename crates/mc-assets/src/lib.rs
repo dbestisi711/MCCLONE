@@ -2,26 +2,99 @@
 //!
 //! The pack is the repository root itself (it contains `blocks.json`,
 //! `textures/`, `models/`, ...). Assets are read at runtime from that
-//! directory; nothing from the pack is embedded in the binary.
+//! directory; nothing from the pack is embedded in the binary. All file
+//! access goes through [`Pack`] so the crate can later be pointed at another
+//! storage backend (web).
 //!
 //! OWNER: models & textures agent. Public API used by other crates:
-//! - [`Pack::open`], [`Pack::find`], [`Pack::load_image`]
+//! - [`Pack::open`], [`Pack::find`], [`Pack::load_image`], [`Pack::load_texture`]
 //! - [`Assets::load`] → [`BlockTextures`], [`ItemIcons`], [`EntityModels`], [`ColorMaps`]
+//! - [`generate_mips`] (alpha-aware mip chain for block tiles)
+//! - [`EntityModel::mesh`] / [`EntityModel::bone_matrices`] (posed entity triangles)
+//! - [`EntityModels::client_entity`] (`"minecraft:pig"` → geometry ids + texture paths),
+//!   [`EntityModels::entity_model`], [`EntityModels::rest_pose`]
+//! - [`ItemIcons::display_icon`] (flat or isometric icon per item), the icon
+//!   `atlas` + [`ItemIcons::atlas_uv`], [`ItemIcons::render_block_icon`]
+//!
+//! Visual check: `cargo run -p mc-assets --example dump -- <out_dir>` writes
+//! contact sheets of tiles, blocks, item icons and posed mob models.
+//!
+//! ## Block textures
+//! Every block in `mc_core::block::BLOCK_DEFS` is resolved through
+//! `blocks.json` → `textures/terrain_texture.json` → image. Tiles are 16×16
+//! RGBA. Renderer rules:
+//! - Multiply a face by `ColorMaps::block_tint(block, biome)` only when
+//!   `BlockTextures::tinted[block][face]` is true (e.g. grass top, leaves,
+//!   water; NOT the grass sides/bottom, and not sugar cane whose pack texture
+//!   is already coloured).
+//! - If `overlay[block][face]` is `Some(tile)`, draw that tile on top of the
+//!   face, alpha-blended, **always** multiplied by the block tint (grass block
+//!   sides: dirt base + tinted grass fringe). The base tile already has a
+//!   default plains-green fringe baked in, so ignoring overlays still looks OK.
+//! - Animated tiles ([`TileAnimation`]): at game tick `t` show
+//!   `frames[(t / ticks_per_frame) % frames.len()]` in place of `tile`
+//!   ([`BlockTextures::animated_tile`]). Extra frames are stored after
+//!   `static_tile_count`, so a renderer limited to 256 array layers can upload
+//!   only the static tiles and copy the current frame into layer `tile`.
+//! - Mipmaps: [`generate_mips`] keeps cutout coverage (leaves don't vanish).
+//! - [`BlockTextures::isotropic`]: faces whose texture may be randomly
+//!   rotated per block to hide tiling (grass top, sand, dirt...).
+//!
+//! ## Entity models
+//! Model space: blocks, +Y up, feet at y = 0, the model faces **-Z**, and
+//! the model's own right-hand side (`rightArm`, `leg0`...) is at **+X**.
+//! Geo files use a mirrored X axis; the parser converts. Triangles are
+//! counter-clockwise when seen from outside. UVs are normalised by the
+//! geometry's `texture_width/height`, so any texture resolution works.
+//! `BonePose` values use the **same convention as the pack's `.geo.json` and
+//! `animations/*.json`**, so numbers can be copied from those files:
+//! - `rotation` (degrees, added to the bone's rest rotation, applied X then Y
+//!   then Z around the bone pivot): +X pitches the bone's front (-Z side)
+//!   down (head looks down, a hanging arm swings backward; zombie arms
+//!   straight forward = `x: -90`); +Y turns the front toward the model's
+//!   right; +Z rolls the model's right side up.
+//! - `offset` (pixels, 1/16 block, geo axes): +x = toward the model's LEFT
+//!   side, +y = up, +z = backward.
+//! - `scale`: uniform around the pivot, 0 hides the bone and its children.
+//!
+//! [`EntityModels::rest_pose`] evaluates the constant part of an entity's
+//! pack animations (e.g. the spider's leg spread); add gameplay rotations on
+//! top. Draw entities **without back-face culling**: mob cutouts are double
+//! sided in the game (chicken legs are painted on the inside of a mostly
+//! transparent box).
+//!
+//! ## Entity textures
+//! Bedrock `.tga` entity textures use alpha as a *mask* (e.g. sheep wool
+//! tint mask), not as transparency. Load textures for rendering with
+//! [`Pack::load_texture`], which makes such masks opaque; then alpha-test
+//! (discard alpha < 0.5) and the result matches the game.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use mc_core::{BlockId, Face, ItemId, Rgba8Image};
-use rustc_hash::FxHashMap as HashMap;
+use mc_core::{BlockId, Rgba8Image};
 
+pub mod animations;
+pub mod blocks;
+pub mod image_ops;
+pub mod items;
 pub mod models;
 
-pub use models::{EntityModel, EntityModels, ModelVertex};
+pub use blocks::{BlockTextures, TileAnimation, TileId, load_block_textures};
+pub use image_ops::{generate_mips, magenta_checker, resize_nearest};
+pub use items::{BLOCK_ICON_SIZE, ItemIcons};
+pub use models::{Bone, ClientEntity, Cube, EntityModel, EntityModels, FaceUv, ModelVertex};
 
 /// Handle to the resource pack directory.
 #[derive(Clone, Debug)]
 pub struct Pack {
     pub root: PathBuf,
+}
+
+/// Image file formats the pack uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageFormat {
+    Png,
+    Tga,
 }
 
 impl Pack {
@@ -62,96 +135,107 @@ impl Pack {
         self.root.join(rel)
     }
 
-    /// Load an image by pack-relative path. The extension may be omitted, in
-    /// which case `.png` then `.tga` are tried.
-    pub fn load_image(&self, rel: &str) -> Option<Rgba8Image> {
-        let base = self.root.join(rel);
-        let candidates: Vec<PathBuf> = if base.extension().is_some() && base.is_file() {
-            vec![base]
-        } else {
-            vec![
-                base.with_extension("png"),
-                base.with_extension("tga"),
-                PathBuf::from(format!("{}.png", base.display())),
-                PathBuf::from(format!("{}.tga", base.display())),
-            ]
+    /// Does a pack-relative file exist?
+    pub fn exists(&self, rel: &str) -> bool {
+        self.root.join(rel).is_file()
+    }
+
+    /// Pack-relative paths (with `/` separators) of the files directly inside
+    /// `rel_dir` whose name ends with `suffix`, sorted.
+    pub fn list_files(&self, rel_dir: &str, suffix: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(self.root.join(rel_dir)) else {
+            return out;
         };
-        for p in candidates {
-            if p.is_file() {
-                match image::open(&p) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        return Some(Rgba8Image {
-                            width: rgba.width(),
-                            height: rgba.height(),
-                            data: rgba.into_raw(),
-                        });
-                    }
-                    Err(e) => log::warn!("failed to decode {}: {e}", p.display()),
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(suffix) && e.path().is_file() {
+                out.push(format!("{}/{}", rel_dir.trim_end_matches('/'), name));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Resolve an image path. With an explicit `.png`/`.tga` extension that
+    /// file is used; otherwise `<rel>.png` and `<rel>.tga` are tried in the
+    /// given order.
+    fn image_path(&self, rel: &str, prefer_tga: bool) -> Option<(PathBuf, ImageFormat)> {
+        let lower = rel.to_ascii_lowercase();
+        if lower.ends_with(".png") || lower.ends_with(".tga") {
+            let p = self.root.join(rel);
+            let fmt = if lower.ends_with(".tga") {
+                ImageFormat::Tga
+            } else {
+                ImageFormat::Png
+            };
+            return p.is_file().then_some((p, fmt));
+        }
+        let png = (self.root.join(format!("{rel}.png")), ImageFormat::Png);
+        let tga = (self.root.join(format!("{rel}.tga")), ImageFormat::Tga);
+        let order = if prefer_tga { [tga, png] } else { [png, tga] };
+        order.into_iter().find(|(p, _)| p.is_file())
+    }
+
+    /// Decode an image file into RGBA8.
+    fn decode(path: &Path) -> Option<Rgba8Image> {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                Some(Rgba8Image {
+                    width: rgba.width(),
+                    height: rgba.height(),
+                    data: rgba.into_raw(),
+                })
+            }
+            Err(e) => {
+                log::warn!("failed to decode {}: {e}", path.display());
+                None
+            }
+        }
+    }
+
+    /// Load an image by pack-relative path, raw (alpha exactly as stored).
+    /// The extension may be omitted, in which case `.png` then `.tga` are tried.
+    pub fn load_image(&self, rel: &str) -> Option<Rgba8Image> {
+        self.load_image_ext(rel, false).map(|(img, _)| img)
+    }
+
+    /// Like [`Pack::load_image`] but chooses the order of `.png`/`.tga` and
+    /// reports which format was found. Where a pack ships both, the `.tga`
+    /// is the current art (the `.png` is a legacy copy), so block/item
+    /// loading prefers TGA.
+    pub fn load_image_ext(&self, rel: &str, prefer_tga: bool) -> Option<(Rgba8Image, ImageFormat)> {
+        let (path, fmt) = self.image_path(rel, prefer_tga)?;
+        Self::decode(&path).map(|img| (img, fmt))
+    }
+
+    /// Load a texture for rendering (entity textures, GUI images...): like
+    /// [`Pack::load_image`], but for `.tga` files any non-zero alpha becomes
+    /// fully opaque, because Bedrock TGAs store tint/emissive masks in alpha
+    /// (sheep wool, spider eyes...). Fully transparent texels stay transparent,
+    /// so alpha-tested cutouts (skeleton ribs) keep working.
+    pub fn load_texture(&self, rel: &str) -> Option<Rgba8Image> {
+        let (mut img, fmt) = self.load_image_ext(rel, true)?;
+        if fmt == ImageFormat::Tga {
+            for p in img.data.chunks_exact_mut(4) {
+                if p[3] > 0 {
+                    p[3] = 255;
                 }
             }
         }
-        None
+        Some(img)
+    }
+
+    /// Read a text file.
+    pub fn read_string(&self, rel: &str) -> Option<String> {
+        std::fs::read_to_string(self.root.join(rel)).ok()
     }
 
     pub fn load_json(&self, rel: &str) -> Option<serde_json::Value> {
         mc_core::json::load_lenient(&self.root.join(rel))
             .map_err(|e| log::warn!("{e}"))
             .ok()
-    }
-}
-
-/// Index of a 16×16 tile in [`BlockTextures::tiles`].
-pub type TileId = u16;
-
-/// All block face textures as equally sized tiles (suitable for a 2D texture
-/// array, which avoids atlas bleeding and lets greedy meshes repeat UVs).
-#[derive(Clone, Debug, Default)]
-pub struct BlockTextures {
-    /// Tile edge length in pixels (16 for the vanilla pack).
-    pub tile_size: u32,
-    /// Tile images, all `tile_size` × `tile_size`. Tile 0 is the "missing" texture.
-    pub tiles: Vec<Rgba8Image>,
-    /// Per block, per face (`Face::index()` order) tile index.
-    pub faces: Vec<[TileId; 6]>,
-    /// Per block, per face: apply the block's biome tint to this face.
-    pub tinted: Vec<[bool; 6]>,
-    /// Optional overlay tile drawn on top of a face, tinted (grass block sides).
-    pub overlay: Vec<[Option<TileId>; 6]>,
-    /// Tile name → index (texture key from `terrain_texture.json`).
-    pub by_name: HashMap<String, TileId>,
-    /// Animated tiles: (tile, frames, ticks per frame). Frames are additional tiles.
-    pub animations: Vec<TileAnimation>,
-    /// Block-breaking crack overlay tiles, stage 0..10 (`textures/environment/destroy_stage_N`).
-    pub destroy_stages: Vec<TileId>,
-}
-
-#[derive(Clone, Debug)]
-pub struct TileAnimation {
-    pub tile: TileId,
-    pub frames: Vec<TileId>,
-    pub ticks_per_frame: u32,
-}
-
-impl BlockTextures {
-    pub fn face(&self, block: BlockId, face: Face) -> TileId {
-        self.faces
-            .get(block.0 as usize)
-            .map(|f| f[face.index()])
-            .unwrap_or(0)
-    }
-}
-
-/// Item icons, one image per item (block items may be `None`; the UI then
-/// draws an isometric cube from the block textures).
-#[derive(Clone, Debug, Default)]
-pub struct ItemIcons {
-    pub icons: Vec<Option<Arc<Rgba8Image>>>,
-}
-
-impl ItemIcons {
-    pub fn get(&self, item: ItemId) -> Option<&Arc<Rgba8Image>> {
-        self.icons.get(item.0 as usize).and_then(|i| i.as_ref())
     }
 }
 
@@ -163,6 +247,12 @@ pub struct ColorMaps {
 }
 
 impl ColorMaps {
+    pub fn load(pack: &Pack) -> ColorMaps {
+        ColorMaps {
+            grass: pack.load_image("textures/colormap/grass"),
+            foliage: pack.load_image("textures/colormap/foliage"),
+        }
+    }
     fn sample(img: &Option<Rgba8Image>, temperature: f32, downfall: f32, fallback: u32) -> u32 {
         let Some(img) = img else { return fallback };
         let t = temperature.clamp(0.0, 1.0);
@@ -178,7 +268,8 @@ impl ColorMaps {
     pub fn foliage(&self, temperature: f32, downfall: f32) -> u32 {
         Self::sample(&self.foliage, temperature, downfall, 0x59AE30)
     }
-    /// Tint for a block in a biome, 0xRRGGBB (0xFFFFFF = no tint).
+    /// Tint for a block in a biome, 0xRRGGBB (0xFFFFFF = no tint). Apply it
+    /// only to faces flagged in `BlockTextures::tinted` and to overlays.
     pub fn block_tint(&self, block: BlockId, biome: mc_core::BiomeId) -> u32 {
         use mc_core::block::Tint;
         let b = biome.def();
@@ -194,6 +285,30 @@ impl ColorMaps {
             Tint::Fixed(c) => c,
         }
     }
+    /// The block's tint in plains (used for item icons and other places
+    /// without a biome).
+    pub fn default_tint(&self, block: BlockId) -> u32 {
+        self.block_tint(block, mc_core::biome::biomes::PLAINS)
+    }
+}
+
+/// Counts reported by [`Assets::load`].
+#[derive(Clone, Debug, Default)]
+pub struct LoadReport {
+    pub tiles: usize,
+    /// Tiles referenced by faces/overlays/destroy stages (the rest are animation frames).
+    pub static_tiles: usize,
+    pub animated_tiles: usize,
+    /// Block faces that fell back to the missing texture.
+    pub missing_faces: usize,
+    pub items: usize,
+    pub items_with_icons: usize,
+    /// Items whose icon is a generated placeholder (texture not found).
+    pub placeholder_icons: usize,
+    pub models: usize,
+    pub model_failures: usize,
+    pub client_entities: usize,
+    pub failures: Vec<String>,
 }
 
 /// Everything loaded from the pack at startup.
@@ -203,130 +318,64 @@ pub struct Assets {
     pub items: ItemIcons,
     pub models: EntityModels,
     pub colormaps: ColorMaps,
+    pub report: LoadReport,
 }
 
 impl Assets {
     pub fn load(pack: Pack) -> Assets {
-        let blocks = load_block_textures(&pack);
-        let colormaps = ColorMaps {
-            grass: pack.load_image("textures/colormap/grass"),
-            foliage: pack.load_image("textures/colormap/foliage"),
-        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let t0 = std::time::Instant::now();
+        let index = blocks::PackIndex::load(&pack);
+        let colormaps = ColorMaps::load(&pack);
+        let blocks = blocks::load_block_textures_with(&pack, &index, &colormaps);
+        let items = ItemIcons::load_with(&pack, &index, &blocks, &colormaps);
         let models = EntityModels::load(&pack);
+
+        let mut report = LoadReport {
+            tiles: blocks.tiles.len(),
+            static_tiles: blocks.static_tile_count,
+            animated_tiles: blocks.animations.len(),
+            missing_faces: blocks.missing_faces,
+            items: mc_core::ItemId::count() - 1,
+            items_with_icons: (1..mc_core::ItemId::count())
+                .filter(|&i| items.display_icon(mc_core::ItemId(i as u16)).is_some())
+                .count(),
+            placeholder_icons: items.placeholders.len(),
+            models: models.by_id.len(),
+            model_failures: models.failures.len(),
+            client_entities: models.entities.len(),
+            failures: Vec::new(),
+        };
+        report.failures.extend(blocks.failures.iter().cloned());
+        report.failures.extend(items.placeholders.iter().cloned());
+        report.failures.extend(models.failures.iter().cloned());
+        for f in &report.failures {
+            log::warn!("asset problem: {f}");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let took = format!(" in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        #[cfg(target_arch = "wasm32")]
+        let took = String::new();
+        log::info!(
+            "assets loaded{took}: {} tiles ({} static, {} animated), {} missing block faces, {}/{} items with icons ({} placeholders), {} models ({} failed files), {} client entities",
+            report.tiles,
+            report.static_tiles,
+            report.animated_tiles,
+            report.missing_faces,
+            report.items_with_icons,
+            report.items,
+            report.placeholder_icons,
+            report.models,
+            report.model_failures,
+            report.client_entities,
+        );
         Assets {
-            items: ItemIcons::default(),
+            items,
             blocks,
             models,
             colormaps,
+            report,
             pack,
         }
     }
-}
-
-/// Minimal block texture loader: resolves `blocks.json` → `terrain_texture.json`
-/// → image for every registered block. (The assets agent will extend this
-/// with overlays, animations, carried textures, mipmaps etc.)
-pub fn load_block_textures(pack: &Pack) -> BlockTextures {
-    let mut bt = BlockTextures {
-        tile_size: 16,
-        ..Default::default()
-    };
-    let missing = magenta_checker(16);
-    bt.tiles.push(missing);
-    bt.by_name.insert("missing".into(), 0);
-
-    let blocks_json = pack.load_json("blocks.json").unwrap_or_default();
-    let terrain = pack
-        .load_json("textures/terrain_texture.json")
-        .unwrap_or_default();
-    let tex_data = &terrain["texture_data"];
-
-    let tile_for = |bt: &mut BlockTextures, key: &str| -> TileId {
-        if let Some(&t) = bt.by_name.get(key) {
-            return t;
-        }
-        let path = match &tex_data[key]["textures"] {
-            serde_json::Value::String(s) => Some(s.clone()),
-            serde_json::Value::Array(a) => a.first().and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                o => o["path"].as_str().map(str::to_string),
-            }),
-            o => o["path"].as_str().map(str::to_string),
-        };
-        let img = path.and_then(|p| pack.load_image(&p));
-        let id = match img {
-            Some(img) => {
-                // Use the first square frame (animated textures are vertical strips).
-                let s = img.width.min(img.height);
-                let mut tile = img.crop(0, 0, s, s);
-                if s != 16 {
-                    tile = resize_nearest(&tile, 16, 16);
-                }
-                bt.tiles.push(tile);
-                (bt.tiles.len() - 1) as TileId
-            }
-            None => 0,
-        };
-        bt.by_name.insert(key.to_string(), id);
-        id
-    };
-
-    for b in BlockId::all() {
-        let def = b.def();
-        let entry = &blocks_json[def.pack_name]["textures"];
-        let mut faces = [0; 6];
-        for f in Face::ALL {
-            let key = match entry {
-                serde_json::Value::String(s) => Some(s.as_str()),
-                serde_json::Value::Object(m) => m
-                    .get(f.pack_key())
-                    .or_else(|| match f {
-                        Face::North | Face::South | Face::East | Face::West => m.get("side"),
-                        _ => None,
-                    })
-                    .and_then(|v| v.as_str()),
-                _ => None,
-            };
-            faces[f.index()] = key.map(|k| tile_for(&mut bt, k)).unwrap_or(0);
-        }
-        bt.faces.push(faces);
-        let tint_all = !matches!(def.tint, mc_core::block::Tint::None);
-        let tinted = if b == mc_core::blocks::GRASS_BLOCK {
-            [true, false, false, false, false, false]
-        } else {
-            [tint_all; 6]
-        };
-        bt.tinted.push(tinted);
-        bt.overlay.push([None; 6]);
-    }
-    bt
-}
-
-pub fn magenta_checker(size: u32) -> Rgba8Image {
-    let mut img = Rgba8Image::new(size, size);
-    for y in 0..size {
-        for x in 0..size {
-            let on = ((x / (size / 2)) + (y / (size / 2))) % 2 == 0;
-            img.put(
-                x,
-                y,
-                if on {
-                    [248, 0, 248, 255]
-                } else {
-                    [0, 0, 0, 255]
-                },
-            );
-        }
-    }
-    img
-}
-
-pub fn resize_nearest(src: &Rgba8Image, w: u32, h: u32) -> Rgba8Image {
-    let mut out = Rgba8Image::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            out.put(x, y, src.get(x * src.width / w, y * src.height / h));
-        }
-    }
-    out
 }
