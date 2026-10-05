@@ -80,7 +80,23 @@ pub(crate) struct MobCtx<'a> {
     pub arrows: &'a mut Vec<Arrow>,
     pub explosions: &'a mut Vec<(Vec3, f32)>,
     pub drops: &'a mut Vec<(ItemStack, Vec3)>,
+    /// Path searches still allowed this tick (spreads A* cost over ticks).
+    pub path_budget: u32,
 }
+
+impl MobCtx<'_> {
+    /// Claim one path search for this tick.
+    pub fn take_path_budget(&mut self) -> bool {
+        if self.path_budget == 0 {
+            return false;
+        }
+        self.path_budget -= 1;
+        true
+    }
+}
+
+/// Path searches allowed per tick across all mobs.
+pub const PATH_SEARCHES_PER_TICK: u32 = 4;
 
 impl Mob {
     /// One 20 TPS step: timers, environment, AI, physics, animation.
@@ -224,6 +240,7 @@ impl EntityManager {
                 arrows: &mut new_arrows,
                 explosions: &mut explosions,
                 drops: &mut drops,
+                path_budget: PATH_SEARCHES_PER_TICK,
             };
             for m in self.mobs.iter_mut() {
                 if m.removed() || !ctx.world.has_chunk(ChunkPos::from_world(m.body.pos)) {
@@ -435,6 +452,14 @@ impl EntityManager {
         let attacker = m.body.pos - flat;
         m.hurt(damage, DamageSource::Player { attacker });
         true
+    }
+
+    /// Is any living mob inside `aabb`? (`mc-game` refuses to place a solid
+    /// block into a mob.)
+    pub fn any_mob_in(&self, aabb: &mc_core::Aabb) -> bool {
+        self.mobs
+            .iter()
+            .any(|m| m.alive() && m.aabb().intersects(aabb))
     }
 
     /// Distance to the closest entity hit by a ray (so block targeting can be blocked by mobs).

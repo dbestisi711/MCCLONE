@@ -607,16 +607,17 @@ fn natural_spawning_respects_light_and_caps() {
     for _ in 0..600 {
         w.time_of_day = NIGHT;
         step(&mut w, &mut p, &mut m, 1);
+        // Freshly spawned mobs are never close to the player.
+        for x in m.mobs().iter().filter(|x| x.age <= 1) {
+            let d = (x.pos() - p.position).length();
+            assert!(d >= 23.0, "spawned too close: {d}");
+        }
     }
     let hostile = m.mobs().iter().filter(|x| x.kind.hostile()).count();
     let passive = m.mobs().iter().filter(|x| !x.kind.hostile()).count();
     assert!(hostile > 0, "hostiles spawn at night");
     assert!(hostile <= mc_entity::HOSTILE_CAP + 4);
     assert!(passive > 0 && passive <= mc_entity::PASSIVE_CAP + 4);
-    for x in m.mobs() {
-        let d = (x.pos() - p.position).length();
-        assert!(d >= 23.0, "spawned too close: {d}");
-    }
 
     // Noon on the surface: no new hostiles.
     let mut w = flat_world(4, 63, blocks::GRASS_BLOCK);
@@ -709,4 +710,56 @@ fn player_death_drops_inventory() {
             .iter()
             .any(|e| matches!(e, EntityEvent::PlayerDied { .. }))
     );
+}
+
+#[test]
+fn items_pop_out_of_blocks_and_mobs_suffocate() {
+    let mut w = flat_world(1, 63, blocks::STONE);
+    w.time_of_day = NIGHT;
+    let mut p = survival_player(Vec3::new(0.5, 64.0, 0.5));
+    p.game_mode = GameMode::Creative;
+    let mut m = quiet_manager(20);
+    let stick = ItemStack::new(ItemId::by_name("stick").unwrap(), 1);
+    m.spawn_item(stick, Vec3::new(5.5, 64.2, 5.5));
+    step(&mut w, &mut p, &mut m, 30);
+    assert!(m.items()[0].on_ground);
+    let cell = m.items()[0].pos.floor().as_ivec3();
+    assert_eq!(cell.y, 64);
+    w.set_block(cell, blocks::STONE);
+    step(&mut w, &mut p, &mut m, 10);
+    let it = &m.items()[0];
+    assert!(it.pos.y >= 65.0 - 1e-3, "item popped out to {}", it.pos.y);
+
+    let id = m.spawn_mob(MobKind::Zombie, Vec3::new(-6.5, 64.0, -6.5));
+    assert!(m.any_mob_in(&mc_core::Aabb::block(IVec3::new(-7, 65, -7))));
+    w.set_block(IVec3::new(-7, 65, -7), blocks::STONE);
+    step(&mut w, &mut p, &mut m, 30);
+    assert!(m.mob(id).unwrap().health < 20.0, "suffocating");
+}
+
+#[test]
+fn creeper_defuses_and_follows_when_the_player_escapes() {
+    let mut w = flat_world(2, 63, blocks::GRASS_BLOCK);
+    w.time_of_day = NIGHT;
+    let mut p = survival_player(Vec3::new(0.5, 64.0, 0.5));
+    let mut m = quiet_manager(21);
+    let id = m.spawn_mob(MobKind::Creeper, Vec3::new(3.5, 64.0, 0.5));
+    let mut fused = false;
+    for _ in 0..100 {
+        step(&mut w, &mut p, &mut m, 1);
+        if m.mob(id).unwrap().fuse > 10 {
+            fused = true;
+            break;
+        }
+    }
+    assert!(fused);
+    // Teleport out of the 7 block range: the fuse winds down and the creeper
+    // walks after the player instead of exploding.
+    p.position = Vec3::new(-12.5, 64.0, 0.5);
+    p.prev_position = p.position;
+    let start = m.mob(id).unwrap().pos();
+    step(&mut w, &mut p, &mut m, 60);
+    let c = m.mob(id).expect("did not explode");
+    assert_eq!(c.fuse, 0);
+    assert!(c.pos().x < start.x - 1.0, "followed the player");
 }

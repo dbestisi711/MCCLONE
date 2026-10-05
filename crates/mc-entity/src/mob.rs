@@ -565,7 +565,7 @@ impl Mob {
             self.fire_ticks = 0;
         }
         if self.spec().undead
-            && self.age % 20 == 0
+            && self.age.is_multiple_of(20)
             && !self.body.in_water
             && world.daylight() > 0.65
             && sky_exposed(world, self.eye())
@@ -580,6 +580,9 @@ impl Mob {
         }
         if physics::touches_block(world, &self.aabb(), 0.01, blocks::CACTUS) {
             self.hurt(1.0, DamageSource::Cactus);
+        }
+        if physics::in_opaque_block(world, self.eye()) {
+            self.hurt(1.0, DamageSource::Suffocation);
         }
     }
 
@@ -641,10 +644,7 @@ pub fn light_levels(world: &World, p: IVec3, time_of_day: bool) -> (u8, u8) {
             let l = world.light(p);
             (l >> 4, l & 15)
         }
-        Some(c) => {
-            let h = c.height(p.x & 15, p.z & 15);
-            (if p.y > h { 15 } else { 0 }, 0)
-        }
+        Some(c) => (estimate_sky_light(c, p), 0),
         None => (15, 0),
     };
     if time_of_day {
@@ -655,4 +655,33 @@ pub fn light_levels(world: &World, p: IVec3, time_of_day: bool) -> (u8, u8) {
     } else {
         (sky, block)
     }
+}
+
+/// Sky light estimate for chunks without computed light: full above the
+/// surface, reduced by each translucent block (leaves, glass, water) above,
+/// and dark under any opaque block.
+fn estimate_sky_light(c: &mc_core::Chunk, p: IVec3) -> u8 {
+    let (x, z) = (p.x & 15, p.z & 15);
+    let h = c.height(x, z);
+    if p.y > h {
+        return 15;
+    }
+    if h - p.y > 48 {
+        return 0;
+    }
+    let mut light = 15u8;
+    for y in (p.y + 1)..=h {
+        let id = c.get(x, y, z);
+        if id.is_air() {
+            continue;
+        }
+        if id.def().occludes() {
+            return 0;
+        }
+        light = light.saturating_sub(if id.def().fluid { 2 } else { 1 });
+        if light == 0 {
+            break;
+        }
+    }
+    light
 }

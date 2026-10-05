@@ -29,6 +29,8 @@ pub enum DamageSource {
     Cactus,
     /// Below the world. Also hurts creative players.
     Void,
+    /// Head inside a solid block.
+    Suffocation,
     /// Melee hit by a mob standing at `attacker`.
     Mob {
         attacker: Vec3,
@@ -659,6 +661,9 @@ impl Player {
         }
         if physics::touches_block(world, &self.aabb(), 0.01, blocks::CACTUS) {
             self.damage(1.0, DamageSource::Cactus);
+        }
+        if physics::in_opaque_block(world, self.position + Vec3::Y * self.eye_height) {
+            self.damage(1.0, DamageSource::Suffocation);
         }
     }
 

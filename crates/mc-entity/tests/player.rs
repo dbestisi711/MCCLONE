@@ -167,8 +167,10 @@ fn analog_move_axis_moves_the_player() {
     let w = flat_world(1, 63, blocks::STONE);
     let mut p = survival_player(Vec3::new(0.5, 64.0, 0.5));
     p.yaw = 0.0; // facing -Z
-    let mut i = InputState::default();
-    i.move_axis = (0.0, 1.0);
+    let mut i = InputState {
+        move_axis: (0.0, 1.0),
+        ..Default::default()
+    };
     run(&mut p, &w, &i, 20);
     assert!(p.position.z < -3.0, "{:?}", p.position);
     let z = p.position.z;

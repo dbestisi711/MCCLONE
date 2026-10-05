@@ -62,6 +62,14 @@ impl ItemEntity {
             self.dead = true;
             return;
         }
+        if physics::collides(world, &self.aabb().inflate(-0.01)) {
+            // Inside a block (placed on top of it, or spawned in one): pop up.
+            let cell = (self.pos + Vec3::Y * (ITEM_SIZE * 0.5)).floor();
+            self.pos.y = cell.y + 1.0;
+            self.vel = Vec3::new(self.vel.x * 0.5, 0.05, self.vel.z * 0.5);
+            self.on_ground = false;
+            return;
+        }
         let mut body = Body::new(self.pos, ITEM_SIZE, ITEM_SIZE);
         body.vel = self.vel;
         body.on_ground = self.on_ground;

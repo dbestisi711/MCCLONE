@@ -430,6 +430,14 @@ pub fn touches_block(world: &World, aabb: &Aabb, grow: f32, id: BlockId) -> bool
     false
 }
 
+/// Is the point inside a full opaque block (suffocation)? Unloaded chunks
+/// do not count.
+pub fn in_opaque_block(world: &World, p: Vec3) -> bool {
+    world
+        .block_loaded(p.floor().as_ivec3())
+        .is_some_and(|id| id.def().occludes() && is_solid(id))
+}
+
 /// Is the body inside a climbable block (vines)?
 pub fn is_climbable_at(world: &World, pos: Vec3) -> bool {
     world.block(pos.floor().as_ivec3()) == blocks::VINE

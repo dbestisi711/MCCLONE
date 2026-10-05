@@ -495,7 +495,9 @@ impl Game {
                     };
                     let existing = self.world.block(pos);
                     let bbox = mc_core::Aabb::block(pos);
-                    let blocked = block.def().solid && bbox.intersects(&self.player.aabb());
+                    let blocked = block.def().solid
+                        && (bbox.intersects(&self.player.aabb())
+                            || self.entities.any_mob_in(&bbox));
                     if existing.def().replaceable
                         && !blocked
                         && pos.y >= mc_core::WORLD_MIN_Y

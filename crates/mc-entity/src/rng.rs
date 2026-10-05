@@ -47,7 +47,7 @@ impl Rng {
         if n == 0 {
             return 0;
         }
-        ((self.next_u64() >> 32) * n as u64 >> 32) as u32
+        (((self.next_u64() >> 32) * n as u64) >> 32) as u32
     }
 
     /// Uniform integer in `lo..=hi`.

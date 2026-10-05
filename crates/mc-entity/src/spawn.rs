@@ -1,10 +1,10 @@
 //! Natural spawning and despawning around the player.
 //!
-//! - Hostiles: one attempt per tick in a random column 24..=96 blocks away
+//! - Hostiles: one attempt per tick in a random column 24..=120 blocks away
 //!   (horizontally), at a random height up to the surface (so caves count).
 //!   Needs block light 0 and effective sky light (darkened by time of day)
 //!   at most a random 0..=7. Groups of 1–4.
-//! - Passive: every 20 ticks, on the surface of grass 24..=96 blocks away
+//! - Passive: every 20 ticks, on the surface of grass 24..=120 blocks away
 //!   with raw light ≥ 9. Groups of 2–4 of one kind.
 //! - Caps count mobs within 128 blocks of the player.
 //! - Hostiles despawn beyond 128 blocks, or randomly (1/800 per tick) when
@@ -22,7 +22,7 @@ use crate::{EntityManager, Player};
 pub const HOSTILE_CAP: usize = 50;
 pub const PASSIVE_CAP: usize = 14;
 pub const SPAWN_MIN_DIST: f32 = 24.0;
-pub const SPAWN_MAX_DIST: f32 = 96.0;
+pub const SPAWN_MAX_DIST: f32 = 120.0;
 pub const CAP_RANGE: f32 = 128.0;
 pub const HOSTILE_DESPAWN_DIST: f32 = 128.0;
 pub const RANDOM_DESPAWN_DIST: f32 = 32.0;

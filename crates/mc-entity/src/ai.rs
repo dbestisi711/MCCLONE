@@ -55,6 +55,8 @@ pub struct AiState {
     pub path_index: usize,
     pub path_cooldown: u32,
     pub path_speed: f32,
+    /// Goal the current chase path was computed for.
+    pub path_goal: Option<IVec3>,
     pub wander_cooldown: u32,
     pub look_target: Option<Vec3>,
     pub look_ticks: u32,
@@ -210,7 +212,8 @@ impl Mob {
             if self.egg_timer == 0 {
                 self.egg_timer = 6000 + ctx.rng.below(6000);
                 if let Some(egg) = ItemId::by_name("egg") {
-                    ctx.drops.push((ItemStack::new(egg, 1), self.body.pos));
+                    let at = self.body.pos + Vec3::Y * 0.3;
+                    ctx.drops.push((ItemStack::new(egg, 1), at));
                     ctx.events
                         .push(EntityEvent::sound("mob.chicken.plop", self.body.pos));
                 }
@@ -225,7 +228,7 @@ impl Mob {
 
         if self.ai.panic_ticks > 0 {
             let need = self.ai.path.is_none() || self.ai.path_cooldown == 0;
-            if need {
+            if need && ctx.take_path_budget() {
                 let target = self.random_target(ctx, 5, 3, self.ai.panic_from, false);
                 if let Some(t) = target {
                     let cfg = self.path_config(120, false, 0);
@@ -239,7 +242,11 @@ impl Mob {
             return;
         }
 
-        if !self.follow_path(intent) && self.ai.wander_cooldown == 0 && ctx.rng.one_in(120) {
+        if !self.follow_path(intent)
+            && self.ai.wander_cooldown == 0
+            && ctx.rng.one_in(120)
+            && ctx.take_path_budget()
+        {
             if let Some(t) = self.random_target(ctx, 10, 7, None, true) {
                 let cfg = self.path_config(200, true, 0);
                 let p = path::find_path(ctx.world, feet_block(self.body.pos), t, &cfg);
@@ -340,7 +347,7 @@ impl Mob {
             sky.max(block) >= 12
         };
         let neutral = self.kind == MobKind::Spider && !self.ai.provoked && bright;
-        let staggered = (self.age as u64 + self.id) % 10 == 0;
+        let staggered = (self.age as u64 + self.id).is_multiple_of(10);
 
         if !self.ai.target_player {
             if player.targetable()
@@ -356,7 +363,7 @@ impl Mob {
                 self.ai.path_cooldown = 0;
             }
         } else {
-            if (self.age as u64 + self.id) % 5 == 0 {
+            if (self.age as u64 + self.id).is_multiple_of(5) {
                 self.ai.sees_target =
                     physics::line_of_sight(ctx.world, self.eye(), player.eye_position(1.0));
                 if self.ai.sees_target {
@@ -377,7 +384,11 @@ impl Mob {
             if self.kind == MobKind::Creeper {
                 self.fuse = (self.fuse - 1).max(0);
             }
-            if !self.follow_path(intent) && self.ai.wander_cooldown == 0 && ctx.rng.one_in(120) {
+            if !self.follow_path(intent)
+                && self.ai.wander_cooldown == 0
+                && ctx.rng.one_in(120)
+                && ctx.take_path_budget()
+            {
                 if let Some(t) = self.random_target(ctx, 10, 7, None, false) {
                     let cfg = self.path_config(200, true, 0);
                     let p = path::find_path(ctx.world, feet_block(self.body.pos), t, &cfg);
@@ -437,14 +448,18 @@ impl Mob {
         }
         let cfg = self.path_config(500, false, 1);
         let goal = Self::player_goal(ctx, &cfg);
-        let stale = match self.ai.path.as_ref().and_then(|p| p.goal()) {
-            None => true,
-            Some(end) => (end - goal).abs().max_element() > 1,
-        };
-        if stale && self.ai.path_cooldown == 0 {
+        // Recompute when there is no path or the target moved; an
+        // unreachable target is not searched again until it moves.
+        let stale = self.ai.path.is_none()
+            || self
+                .ai
+                .path_goal
+                .is_none_or(|g| (g - goal).abs().max_element() > 1);
+        if stale && self.ai.path_cooldown == 0 && ctx.take_path_budget() {
             let p = path::find_path(ctx.world, feet_block(self.body.pos), goal, &cfg);
             let ok = p.is_some();
             self.set_path(p, speed);
+            self.ai.path_goal = Some(goal);
             self.ai.path_cooldown = if ok {
                 10 + ctx.rng.below(10)
             } else {
@@ -547,10 +562,10 @@ impl Mob {
             return;
         }
         if dist > 7.0 || !self.ai.sees_target {
+            // Target got away: defuse while following it again.
             self.fuse = (self.fuse - 1).max(0);
-            if self.fuse == 0 {
-                return;
-            }
+            self.chase(ctx, intent, self.spec().chase_speed, dist);
+            return;
         } else {
             if self.fuse == 0 {
                 ctx.events
