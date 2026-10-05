@@ -735,6 +735,9 @@ impl<'a> ChunkGen<'a> {
         for (i, b) in self.biomes.iter().enumerate() {
             chunk.biomes[i] = *b;
         }
+        // Like a chunk whose heightmap was recomputed: non-zero so consumers
+        // that track revisions treat it as new content.
+        chunk.revision = 1;
         chunk
     }
 }
