@@ -229,7 +229,7 @@ fn default_query(name: &str) -> Option<f32> {
 
 /// Evaluate a Molang expression for a static pose: numbers, `this`,
 /// arithmetic, comparisons, `! && ||`, `? :`, `math.*` (degrees) and the
-/// queries in [`default_query`]. Returns `None` if the result depends on
+/// queries with assumed default values (adult, standing still). Returns `None` if the result depends on
 /// anything else (variables, targets, time-varying queries).
 pub fn eval_molang(src: &str, this: f32) -> Option<f32> {
     let s = src.trim().trim_end_matches(';').to_ascii_lowercase();
