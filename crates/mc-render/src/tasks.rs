@@ -30,6 +30,7 @@ pub enum Priority {
     Low = 2,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
