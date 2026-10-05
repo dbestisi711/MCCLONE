@@ -32,7 +32,7 @@ use rustc_hash::FxHashMap as HashMap;
 use serde_json::Value;
 
 use crate::Pack;
-use crate::animations::{Animation, load_animations};
+use crate::animations::{Animation, condition_holds, load_animations, load_controllers};
 
 /// Vertex produced by posing a model, in model space (units: blocks).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -160,8 +160,11 @@ fn face_corners(f: Face, a: Vec3, b: Vec3) -> [Vec3; 4] {
 }
 
 impl EntityModel {
+    /// Bone index by name (case-insensitive, like the pack).
     pub fn bone_index(&self, name: &str) -> Option<usize> {
-        self.bones.iter().position(|b| &*b.name == name)
+        self.bones
+            .iter()
+            .position(|b| b.name.eq_ignore_ascii_case(name))
     }
 
     /// Per-bone transforms in model-space **pixels** with poses applied.
@@ -170,7 +173,9 @@ impl EntityModel {
         let mut world = Vec::with_capacity(self.bones.len());
         let mut hidden = Vec::with_capacity(self.bones.len());
         for bone in &self.bones {
-            let pose = poses.iter().find(|p| *p.bone == *bone.name);
+            let pose = poses
+                .iter()
+                .find(|p| p.bone.eq_ignore_ascii_case(&bone.name));
             let (rot, off, scale) = pose.map(|p| (p.rotation, p.offset, p.scale)).unwrap_or((
                 Vec3::ZERO,
                 Vec3::ZERO,
@@ -333,6 +338,8 @@ pub struct ClientEntity {
     pub render_controllers: Vec<Arc<str>>,
     /// `scripts.animate` entries: (animation name, Molang condition if any).
     pub animate: Vec<(Arc<str>, Option<Arc<str>>)>,
+    /// Legacy `animation_controllers` list: (name, controller id).
+    pub animation_controllers: Vec<(Arc<str>, Arc<str>)>,
     /// Spawn egg texture key, if any.
     pub spawn_egg: Option<Arc<str>>,
     /// File it was read from.
@@ -341,6 +348,41 @@ pub struct ClientEntity {
 
 fn lookup<'a>(list: &'a [(Arc<str>, Arc<str>)], name: &str) -> Option<&'a str> {
     list.iter().find(|(k, _)| &**k == name).map(|(_, v)| &**v)
+}
+
+/// `"default"` if present, else the most "plain" entry: names mentioning
+/// babies or add-on layers (armor, decor, saddle...) rank last.
+fn default_entry(list: &[(Arc<str>, Arc<str>)]) -> Option<&str> {
+    if let Some(v) = lookup(list, "default") {
+        return Some(v);
+    }
+    let score = |k: &str| {
+        let k = k.to_ascii_lowercase();
+        let mut s = 0;
+        if k.contains("baby") {
+            s += 4;
+        }
+        for w in [
+            "armor",
+            "decor",
+            "saddle",
+            "overlay",
+            "collar",
+            "chest",
+            "harness",
+            "charged",
+            "invisible",
+            "_v1",
+        ] {
+            if k.contains(w) {
+                s += 2;
+            }
+        }
+        s
+    };
+    list.iter()
+        .min_by(|a, b| score(&a.0).cmp(&score(&b.0)).then(a.0.cmp(&b.0)))
+        .map(|(_, v)| &**v)
 }
 
 impl ClientEntity {
@@ -356,15 +398,13 @@ impl ClientEntity {
     pub fn animation(&self, name: &str) -> Option<&str> {
         lookup(&self.animations, name)
     }
-    /// `"default"` texture (or the first one).
+    /// `"default"` texture, else the plainest one (not baby/armor/decor...).
     pub fn default_texture(&self) -> Option<&str> {
-        self.texture("default")
-            .or_else(|| self.textures.first().map(|(_, v)| &**v))
+        default_entry(&self.textures)
     }
-    /// `"default"` geometry (or the first one).
+    /// `"default"` geometry, else the plainest one.
     pub fn default_geometry(&self) -> Option<&str> {
-        self.geometry("default")
-            .or_else(|| self.geometry.first().map(|(_, v)| &**v))
+        default_entry(&self.geometry)
     }
 }
 
@@ -376,6 +416,8 @@ pub struct EntityModels {
     pub entities: HashMap<Arc<str>, Arc<ClientEntity>>,
     /// Animations from `animations/*.json` by id (static poses only).
     pub animations: HashMap<Arc<str>, Arc<Animation>>,
+    /// Animation controller id → animation names its initial state always plays.
+    pub controllers: HashMap<Arc<str>, Vec<Arc<str>>>,
     /// Files or geometries that could not be parsed/resolved.
     pub failures: Vec<String>,
 }
@@ -421,6 +463,7 @@ impl EntityModels {
         }
 
         out.animations = load_animations(pack);
+        out.controllers = load_controllers(pack);
 
         for f in pack.list_files("entity", ".json") {
             let Some(v) = pack.load_json(&f) else {
@@ -476,18 +519,35 @@ impl EntityModels {
     /// [`EntityModels::rest_pose`] for a specific model of the entity.
     pub fn rest_pose_for(&self, ce: &ClientEntity, model: &EntityModel) -> Vec<BonePose> {
         let mut poses: Vec<BonePose> = Vec::new();
-        // Legacy entities without `scripts.animate` play every listed animation.
-        let names: Vec<&Arc<str>> = if ce.animate.is_empty() {
-            ce.animations.iter().map(|(k, _)| k).collect()
-        } else {
-            ce.animate
-                .iter()
-                .filter(|(_, cond)| cond.is_none())
-                .map(|(k, _)| k)
-                .collect()
-        };
-        for name in names {
-            let Some(anim) = ce.animation(name).and_then(|a| self.animations.get(a)) else {
+        // Unconditional `scripts.animate` entries plus the initial state of
+        // every animation controller (legacy `animation_controllers` list or
+        // controllers named in `animate`).
+        let mut ids: Vec<Arc<str>> = Vec::new();
+        let mut stack: Vec<Arc<str>> = ce
+            .animate
+            .iter()
+            .filter(|(_, cond)| cond.as_deref().is_none_or(condition_holds))
+            .filter_map(|(k, _)| ce.animation(k).map(Arc::from))
+            .collect();
+        stack.extend(ce.animation_controllers.iter().map(|(_, c)| c.clone()));
+        let mut guard = 0;
+        while let Some(id) = stack.pop() {
+            guard += 1;
+            if guard > 256 {
+                break;
+            }
+            if let Some(names) = self.controllers.get(&id) {
+                for n in names {
+                    if let Some(a) = ce.animation(n) {
+                        stack.push(Arc::from(a));
+                    }
+                }
+            } else if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        for id in ids.iter().rev() {
+            let Some(anim) = self.animations.get(id) else {
                 continue;
             };
             for p in anim.static_pose(model) {
@@ -958,6 +1018,10 @@ fn parse_client_entity(v: &Value, source: &str) -> Option<ClientEntity> {
         materials: string_pairs(&d["materials"]),
         animations: string_pairs(&d["animations"]),
         render_controllers,
+        animation_controllers: d["animation_controllers"]
+            .as_array()
+            .map(|a| a.iter().flat_map(string_pairs).collect())
+            .unwrap_or_default(),
         animate: d["scripts"]["animate"]
             .as_array()
             .map(|a| {
@@ -1102,6 +1166,39 @@ mod tests {
                 .unwrap_or_else(|| panic!("no model for {id}"));
             assert!(m.cube_count() > 0);
             assert!(tex.starts_with("textures/entity/"), "{tex}");
+        }
+    }
+
+    #[test]
+    fn rest_poses_from_pack_animations() {
+        let ms = models();
+        // Spider legs spread down to the ground.
+        let spider = ms.rest_pose("minecraft:spider");
+        assert_eq!(spider.len(), 8, "{spider:?}");
+        let (m, _) = ms.entity_model("spider").unwrap();
+        let (lo, _) = m.bounds(&spider).unwrap();
+        assert!(lo.y.abs() < 0.1, "spider feet at {}", lo.y);
+        // Wolf body is turned horizontal; "keep in place" offsets are zero.
+        let wolf = ms.rest_pose("minecraft:wolf");
+        let body = wolf.iter().find(|p| &*p.bone == "body").unwrap();
+        assert_eq!(body.rotation.x, 90.0);
+        assert!(
+            wolf.iter()
+                .filter(|p| &*p.bone != "upperBody")
+                .all(|p| p.offset.length() < 1e-4),
+            "{wolf:?}"
+        );
+        // Sheep head stays where the geometry puts it.
+        assert!(
+            ms.rest_pose("minecraft:sheep")
+                .iter()
+                .all(|p| p.offset.length() < 1e-4)
+        );
+        // Mobs whose geometry is already posed get nothing surprising.
+        for id in ["pig", "cow", "creeper"] {
+            let (m, _) = ms.entity_model(id).unwrap();
+            let rest = ms.rest_pose(id);
+            assert_eq!(m.bounds(&rest), m.bounds(&[]), "{id}: {rest:?}");
         }
     }
 
