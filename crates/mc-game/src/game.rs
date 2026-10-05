@@ -149,6 +149,9 @@ impl Game {
             Some("inventory") => ui.open(Screen::Inventory),
             Some("crafting") => ui.open(Screen::CraftingTable),
             Some("pause") => ui.open(Screen::Pause),
+            Some("creative") => ui.open(Screen::CreativeInventory),
+            Some("death") => ui.open(Screen::Death),
+            Some("furnace") => ui.open(Screen::Furnace),
             _ => {}
         }
         Game {
@@ -236,6 +239,7 @@ impl Game {
             debug_lines,
             target: self.target.map(|t| t.id.def().display.to_string()),
             dead: p.dead,
+            dt: 0.0,
         }
     }
 
@@ -368,7 +372,8 @@ impl Game {
             });
         }
         let (w, h) = self.input.window_size;
-        let hud = self.hud_info();
+        let mut hud = self.hud_info();
+        hud.dt = dt;
         self.ui.build(
             &mut frame.ui,
             w as f32,
@@ -459,6 +464,10 @@ impl Game {
                     self.ui.open(Screen::CraftingTable);
                     return;
                 }
+                if t.id == blocks::FURNACE && !self.input.held(Key::Sneak) {
+                    self.ui.open_furnace(t.block);
+                    return;
+                }
                 if let Some(block) = self
                     .player
                     .inventory
@@ -526,6 +535,12 @@ impl Game {
 
     fn break_block(&mut self, pos: IVec3, id: BlockId, creative: bool) {
         self.world.set_block(pos, blocks::AIR);
+        if id == blocks::FURNACE {
+            for s in self.ui.remove_furnace(pos) {
+                self.entities
+                    .spawn_item(s, pos.as_vec3() + Vec3::splat(0.5));
+            }
+        }
         // Unsupported plants/torches above pop off.
         let above = pos + IVec3::Y;
         let up = self.world.block(above);

@@ -291,6 +291,9 @@ pub static ITEM_DEFS: &[ItemDef] = &[
         7.0,
     ),
     tool("shears", "Shears", "shears", T::Shears, 2, 238, 5.0, 1.0),
+    mat("wheat", "Wheat", "wheat"),
+    mat("paper", "Paper", "paper"),
+    mat("brick", "Brick", "brick"),
 ];
 
 impl ItemId {
