@@ -218,10 +218,13 @@ pub(crate) fn parse_tex_entry_variant(v: &Value, variant: usize) -> Option<TexEn
 /// Which variant of a texture array a block uses. The pack gives carved,
 /// lit and plain pumpkins the same keys; the game picks the array entry by
 /// block type (plain pumpkins use the uncarved side texture as their face).
+/// Huge mushroom blocks index their arrays by the vanilla "huge mushroom
+/// bits" state; variant 14 is skin on every face, which is what worldgen places.
 pub(crate) fn texture_variant(pack_name: &str) -> usize {
     match pack_name {
         "lit_pumpkin" => 1,
         "pumpkin" => 2,
+        "brown_mushroom_block" | "red_mushroom_block" => 14,
         _ => 0,
     }
 }

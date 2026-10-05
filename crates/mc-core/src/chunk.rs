@@ -120,6 +120,17 @@ impl Section {
         self.blocks.as_deref()
     }
 
+    /// Build a section from a full block array (fast path for world
+    /// generation). Light is left uncomputed.
+    pub fn from_blocks(blocks: Box<[BlockId; SECTION_VOLUME]>) -> Self {
+        let non_air = blocks.iter().filter(|b| !b.is_air()).count() as u16;
+        Section {
+            blocks: if non_air == 0 { None } else { Some(blocks) },
+            non_air,
+            light: None,
+        }
+    }
+
     /// Fill the whole section with one block.
     pub fn fill(&mut self, id: BlockId) {
         if id.is_air() {
