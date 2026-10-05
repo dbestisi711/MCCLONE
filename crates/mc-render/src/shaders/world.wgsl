@@ -316,7 +316,7 @@ fn finish_dyn(rgb: vec3<f32>, a: f32, in: DynOut) -> vec4<f32> {
 @fragment
 fn fs_dyn_tex(in: DynOut) -> @location(0) vec4<f32> {
     let t = textureSample(tex2d, samp2d, in.uv);
-    if (t.a * in.tint.a < 0.1) {
+    if (t.a * in.tint.a < 0.5) {
         discard;
     }
     return finish_dyn(t.rgb * in.tint.rgb, 1.0, in);

@@ -86,18 +86,40 @@ pub fn build_tileset(assets: &Assets) -> TileSet {
         cutout.insert(t as TileId);
     }
 
-    // Animations: from the assets, or from the pack's flipbook list.
-    let mut anims: Vec<Anim> = bt
-        .animations
-        .iter()
-        .filter(|a| !a.frames.is_empty())
-        .map(|a| Anim {
-            layer: a.tile as u32,
-            frames: a.frames.iter().map(|&f| f as u32).collect(),
+    // Animations: from the assets, or from the pack's flipbook list. Frames
+    // are copied into the base layer on the GPU, so a frame that *is* the
+    // base tile gets a pristine copy in its own layer.
+    let mut anims: Vec<Anim> = Vec::new();
+    for a in bt.animations.iter().filter(|a| !a.frames.is_empty()) {
+        let base = a.tile as u32;
+        let mut copy: Option<u32> = None;
+        let mut frames = Vec::with_capacity(a.frames.len());
+        for &f in &a.frames {
+            let f = f as u32;
+            if f == base {
+                let c = *copy.get_or_insert_with(|| {
+                    tiles.push(tiles[base as usize].clone());
+                    if cutout.contains(&(base as TileId)) {
+                        cutout.insert((tiles.len() - 1) as TileId);
+                    }
+                    (tiles.len() - 1) as u32
+                });
+                frames.push(c);
+            } else {
+                frames.push(f);
+            }
+        }
+        // Frames of cutout tiles need the same mip treatment.
+        if cutout.contains(&(base as TileId)) {
+            cutout.extend(frames.iter().map(|&f| f as TileId));
+        }
+        anims.push(Anim {
+            layer: base,
+            frames,
             ticks_per_frame: a.ticks_per_frame.max(1),
             current: usize::MAX,
-        })
-        .collect();
+        });
+    }
     if anims.is_empty() {
         anims = flipbook_fallback(assets, &mut tiles, &mut cutout, size);
     }
@@ -492,7 +514,7 @@ impl TexCache {
         let tex = if key.starts_with('@') {
             self.missing.clone()
         } else {
-            match assets.pack.load_image(key) {
+            match assets.pack.load_texture(key) {
                 Some(img) => Arc::new(make_tex(
                     device,
                     queue,

@@ -70,6 +70,8 @@ pub struct MeshTables {
     pub faces: Vec<[u16; 6]>,
     pub face_tint: Vec<[bool; 6]>,
     pub overlay: Vec<[Option<u16>; 6]>,
+    /// Faces whose texture may be rotated randomly per block (grass top, sand...).
+    pub isotropic: Vec<[bool; 6]>,
     /// Per biome: grass, foliage, water colours.
     pub biome_tints: Vec<[[u8; 3]; 3]>,
 }
@@ -121,12 +123,11 @@ impl MeshTables {
                 Tint::Water => TintKind::Water,
                 Tint::Fixed(c) => TintKind::Fixed(rgb(c)),
             };
+            // Only faces the asset loader marks as tinted get the biome
+            // colour (overlays are always tinted).
             let mut ft = [false; 6];
             for i in 0..6 {
-                // Bedrock opaque textures use alpha as a tint mask (grass
-                // sides): tint those faces; the shader applies it by alpha.
-                let masked = layer == LAYER_OPAQUE as u8 && tile_alpha(f[i]).0 && ov[i].is_none();
-                ft[i] = tint != TintKind::None && (tinted[i] || masked);
+                ft[i] = tint != TintKind::None && tinted[i];
             }
             let cube = matches!(d.shape, Shape::Cube);
             info.push(BlockInfo {
@@ -170,6 +171,9 @@ impl MeshTables {
             faces,
             face_tint,
             overlay,
+            isotropic: (0..BlockId::count())
+                .map(|i| bt.isotropic.get(i).copied().unwrap_or([false; 6]))
+                .collect(),
             biome_tints,
         }
     }
@@ -450,6 +454,18 @@ struct Mesher<'a> {
     g: &'a Grid,
     tints: Tints<'a>,
     out: [Vec<u32>; 3],
+    /// World block coordinates of the section origin.
+    origin: [i32; 3],
+    /// Quarter turns applied to full-face UVs (isotropic faces).
+    rot: usize,
+}
+
+/// Stable per-block hash (world coordinates).
+#[inline]
+fn block_hash(x: i32, y: i32, z: i32) -> u32 {
+    (x as u32).wrapping_mul(0x9E37_79B1)
+        ^ (z as u32).wrapping_mul(0x85EB_CA77)
+        ^ (y as u32).wrapping_mul(0xC2B2_AE3D)
 }
 
 impl Mesher<'_> {
@@ -557,6 +573,10 @@ impl Mesher<'_> {
             };
             pos[k] = [x * 16 + local[0], y * 16 + local[1], z * 16 + local[2]];
         }
+        if self.rot != 0 {
+            let r = self.rot;
+            uv = [uv[r & 3], uv[(r + 1) & 3], uv[(r + 2) & 3], uv[(r + 3) & 3]];
+        }
         let tint4 = self.tint4(tint, &pos, 0, 0);
         let (ao, sky, blk) = light;
         let q = Quad {
@@ -592,6 +612,7 @@ impl Mesher<'_> {
             Shape::None => {}
             Shape::Cube => {
                 for f in 0..6 {
+                    let iso = self.t.isotropic.get(id as usize).is_some_and(|i| i[f]);
                     let ni = (pi as isize + AO.q[f]) as usize;
                     let nid = self.g.ids[ni];
                     let n = self.t.info(nid);
@@ -599,6 +620,13 @@ impl Mesher<'_> {
                         continue;
                     }
                     let light = self.face_light(pi, f, true);
+                    self.rot = if iso {
+                        let [ox, oy, oz] = self.origin;
+                        ((block_hash(ox + x, oy + y, oz + z).wrapping_mul(0x27D4_EB2F) >> 13) & 3)
+                            as usize
+                    } else {
+                        0
+                    };
                     self.box_face(
                         layer,
                         (x, y, z),
@@ -625,6 +653,7 @@ impl Mesher<'_> {
                             0,
                         );
                     }
+                    self.rot = 0;
                 }
             }
             Shape::Liquid => {
@@ -756,11 +785,11 @@ impl Mesher<'_> {
         offset: bool,
     ) {
         let (ox, oz) = if offset {
-            let wx = x as u32;
-            let wz = z as u32;
+            let wx = (self.origin[0] + x) as u32;
+            let wz = (self.origin[2] + z) as u32;
             let h = (wx.wrapping_mul(0x9E37_79B1)
                 ^ wz.wrapping_mul(0x85EB_CA77)
-                ^ (y as u32).wrapping_mul(0xC2B2_AE3D))
+                ^ ((self.origin[1] + y) as u32).wrapping_mul(0xC2B2_AE3D))
             .wrapping_mul(0x27D4_EB2F);
             (((h >> 8) % 7) as i32 - 3, ((h >> 16) % 7) as i32 - 3)
         } else {
@@ -979,6 +1008,12 @@ pub fn mesh_section(input: MeshInput, tables: &MeshTables) -> MeshOutput {
                 cache: [None, None, None],
             },
             out: [Vec::new(), Vec::new(), Vec::new()],
+            origin: [
+                input.chunk.x * 16,
+                mc_core::WORLD_MIN_Y + input.sy as i32 * 16,
+                input.chunk.z * 16,
+            ],
+            rot: 0,
         };
         let sec = input.sections[13].as_ref().unwrap();
         let blocks = sec.blocks().unwrap();
@@ -1032,6 +1067,7 @@ mod tests {
             items: ItemIcons::default(),
             models: EntityModels::default(),
             colormaps: ColorMaps::default(),
+            report: Default::default(),
         };
         MeshTables::new(&assets)
     }
