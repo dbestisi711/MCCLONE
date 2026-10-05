@@ -122,6 +122,8 @@ pub struct BlockTextures {
     pub by_name: HashMap<String, TileId>,
     /// Animated tiles: (tile, frames, ticks per frame). Frames are additional tiles.
     pub animations: Vec<TileAnimation>,
+    /// Block-breaking crack overlay tiles, stage 0..10 (`textures/environment/destroy_stage_N`).
+    pub destroy_stages: Vec<TileId>,
 }
 
 #[derive(Clone, Debug)]

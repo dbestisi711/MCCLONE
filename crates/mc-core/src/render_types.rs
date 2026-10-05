@@ -16,7 +16,8 @@ use crate::Rgba8Image;
 ///   `"textures/entity/pig/pig"`; the renderer loads it via `mc-assets`
 ///   (which tries `.png` then `.tga`).
 /// - `"@white"`: a 1×1 white texture (solid-colour quads).
-/// - `"@blocks"`: the block texture array/atlas (UVs from `mc-assets` block textures).
+/// - `"@blocks"`: the block texture *array*: `UiQuad::layer` = `mc_assets::TileId`,
+///   UVs are 0..1 within the tile.
 /// - Any other `"@name"`: a dynamic texture supplied through
 ///   [`UiDrawList::upload`] (e.g. `"@font"`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -150,6 +151,9 @@ pub struct EntityRenderInstance {
     pub model: Arc<str>,
     pub texture: TextureKey,
     /// Model space → world space (position, yaw, scale). Model units are blocks
+    /// and models face -Z in model space, so for an entity at `pos` with yaw
+    /// `yaw` (same convention as `Camera::yaw`) use
+    /// `Mat4::from_translation(pos) * Mat4::from_rotation_y(-yaw)`.
     /// (the asset crate converts geo pixels to blocks).
     pub transform: Mat4,
     pub poses: Vec<BonePose>,
@@ -173,6 +177,16 @@ pub struct DebugBox {
 #[derive(Clone, Copy, Debug)]
 pub struct BlockModelInstance {
     pub block: crate::BlockId,
+    pub transform: Mat4,
+    pub light: u8,
+}
+
+/// A dropped item entity. The renderer draws block items as a small cube and
+/// other items as a flat icon (from `mc_assets::ItemIcons`).
+#[derive(Clone, Copy, Debug)]
+pub struct ItemEntityInstance {
+    pub item: crate::ItemId,
+    /// Item centre, rotation (spin/bob already applied) and scale.
     pub transform: Mat4,
     pub light: u8,
 }
@@ -272,6 +286,7 @@ pub struct FrameData {
     pub sky: SkyState,
     pub entities: Vec<EntityRenderInstance>,
     pub block_models: Vec<BlockModelInstance>,
+    pub items: Vec<ItemEntityInstance>,
     pub sprites: Vec<SpriteInstance>,
     pub boxes: Vec<DebugBox>,
     /// Block currently being broken and progress 0..1 (crack overlay).

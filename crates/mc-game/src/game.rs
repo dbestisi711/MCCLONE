@@ -352,13 +352,13 @@ impl Game {
         let mut frame = FrameData {
             camera,
             sky,
-            entities: self.entities.render_instances(partial),
             breaking: self.breaking,
             held_item: self.player.inventory.selected_item(),
             swing: self.swing,
             third_person: self.third_person,
             ..Default::default()
         };
+        self.entities.fill_frame(partial, &mut frame);
         if let Some(t) = self.target {
             let p = t.block.as_vec3();
             frame.boxes.push(DebugBox {
@@ -696,6 +696,7 @@ pub fn run_screenshot(options: &Options, path: &str) {
     let mut renderer = Renderer::new_offscreen(game.assets.clone(), options.size.0, options.size.1);
     log::info!("offscreen renderer: {}", renderer.adapter_info);
     game.input.window_size = options.size;
+    game.input.scale_factor = 1.0;
     // Simulate requested ticks (mobs, physics) before the shot.
     let idle = InputState::default();
     for _ in 0..options.ticks {

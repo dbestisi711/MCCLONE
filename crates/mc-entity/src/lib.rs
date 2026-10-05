@@ -3,13 +3,13 @@
 //! OWNER: mob behaviour & physics agent. Public API used by `mc-game`
 //! (keep these signatures stable; add freely):
 //! - [`Player`]: `new`, `look`, `tick`, `eye_position`, `camera`
-//! - [`EntityManager`]: `new`, `tick`, `spawn_item`, `attack`, `render_instances`
+//! - [`EntityManager`]: `new`, `tick`, `spawn_item`, `attack`, `raycast`, `fill_frame`
 //!
 //! Stub: a free-flying camera player and no mobs.
 
 use glam::{IVec3, Vec3};
 use mc_core::input::{InputState, Key};
-use mc_core::render_types::{Camera, EntityRenderInstance};
+use mc_core::render_types::{Camera, FrameData};
 use mc_core::{Aabb, Inventory, ItemStack, World};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -167,9 +167,9 @@ impl EntityManager {
         None
     }
 
-    pub fn render_instances(&self, _partial: f32) -> Vec<EntityRenderInstance> {
-        Vec::new()
-    }
+    /// Add this frame's mobs (`frame.entities`), dropped items (`frame.items`),
+    /// falling blocks (`frame.block_models`) and any sprites/particles.
+    pub fn fill_frame(&self, _partial: f32, _frame: &mut FrameData) {}
 
     pub fn count(&self) -> usize {
         0

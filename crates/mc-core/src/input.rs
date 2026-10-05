@@ -66,6 +66,11 @@ pub struct InputState {
     pub window_size: (u32, u32),
     /// The cursor is grabbed for mouselook (no screen open).
     pub cursor_grabbed: bool,
+    /// Window DPI scale factor (1.0 on standard displays).
+    pub scale_factor: f32,
+    /// Analog movement (x = strafe right, y = forward), each -1..1. Added to
+    /// the WASD direction; reserved for touch/gamepad controls in the web port.
+    pub move_axis: (f32, f32),
 }
 
 impl InputState {

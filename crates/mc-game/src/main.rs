@@ -115,6 +115,9 @@ impl ApplicationHandler for App {
                 self.last_frame = now;
                 let size = renderer.size();
                 game.input.window_size = size;
+                if let Some(w) = &self.window {
+                    game.input.scale_factor = w.scale_factor() as f32;
+                }
                 game.input.cursor_grabbed = self.grabbed;
                 let frame = game.frame(dt);
                 renderer.render(&game.world, &frame);
