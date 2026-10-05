@@ -33,6 +33,14 @@ fn main() {
     if a.flag("probe") {
         let p = g.column_params(cx, cz);
         let info = g.probe(cx, cz);
+        let raw = g.raw_params(cx, cz);
+        println!(
+            "raw: h {:.1} biome {}",
+            raw.shape.height,
+            mc_worldgen::biomes::pick(&raw.climate, &raw.shape)
+                .def()
+                .name
+        );
         println!(
             "{:?}\n{:?}\nbiome {} top {} slope {:.2}",
             p.climate,

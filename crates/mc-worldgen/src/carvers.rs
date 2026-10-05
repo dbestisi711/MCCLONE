@@ -267,6 +267,7 @@ impl Carvers {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn canyon_slice(
         &self,
         t: &mut Target,
@@ -366,10 +367,12 @@ impl Carvers {
         }
         t.cg.buf.set(lx, y, lz, new);
         // Expose grass rather than bare dirt when carving the turf away.
-        if new.is_air() && id == blocks::GRASS_BLOCK && y > mc_core::WORLD_MIN_Y {
-            if t.cg.buf.get(lx, y - 1, lz) == blocks::DIRT {
-                t.cg.buf.set(lx, y - 1, lz, blocks::GRASS_BLOCK);
-            }
+        if new.is_air()
+            && id == blocks::GRASS_BLOCK
+            && y > mc_core::WORLD_MIN_Y
+            && t.cg.buf.get(lx, y - 1, lz) == blocks::DIRT
+        {
+            t.cg.buf.set(lx, y - 1, lz, blocks::GRASS_BLOCK);
         }
     }
 }

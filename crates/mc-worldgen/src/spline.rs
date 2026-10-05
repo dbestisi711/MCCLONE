@@ -97,9 +97,7 @@ impl Spline {
         let mut s = Spline::new(coord);
         for i in 0..n {
             let (x, y) = points[i];
-            let slope = if n < 2 {
-                0.0
-            } else if i == 0 || i == n - 1 {
+            let slope = if n < 2 || i == 0 || i == n - 1 {
                 0.0
             } else {
                 let (x0, y0) = points[i - 1];

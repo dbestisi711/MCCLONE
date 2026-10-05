@@ -96,6 +96,7 @@ fn main() {
         let chunks = (x0 - cx0 * 16 + size + 15) / 16;
         let total = (chunks * chunks) as usize;
         let next = AtomicUsize::new(0);
+        let generated = AtomicUsize::new(0);
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(|| {
@@ -114,6 +115,7 @@ fn main() {
                             continue;
                         }
                         let chunk = generator.generate(pos);
+                        generated.fetch_add(1, Ordering::Relaxed);
                         let mut samples = Vec::new();
                         for lz in 0..16 {
                             for lx in 0..16 {
@@ -175,9 +177,9 @@ fn main() {
                 });
             }
         });
-        let n = (chunks * chunks) as f64 / (scale * scale) as f64;
+        let n = generated.load(Ordering::Relaxed) as f64;
         println!(
-            "generated ~{:.0} chunks in {:.2?} ({:.2} ms/chunk/thread)",
+            "generated {:.0} chunks in {:.2?} ({:.2} ms/chunk/thread)",
             n,
             t0.elapsed(),
             t0.elapsed().as_secs_f64() * 1000.0 * threads as f64 / n.max(1.0)
@@ -270,7 +272,7 @@ fn main() {
     }
     let total = (w * w) as f32;
     let mut v: Vec<_> = counts.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|e| std::cmp::Reverse(e.1));
     for (name, n) in v {
         println!("{:>18} {:5.1}%", name, n as f32 * 100.0 / total);
     }

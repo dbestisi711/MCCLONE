@@ -285,7 +285,7 @@ impl Features {
             for lx in 0..16 {
                 let (x, z) = (cg.bx + lx, cg.bz + lz);
                 let top = cg.buf.top_below(lx, lz, cg.max_y);
-                if top < WORLD_MIN_Y + 1 || top >= WORLD_MAX_Y - 4 {
+                if !(WORLD_MIN_Y + 1..WORLD_MAX_Y - 4).contains(&top) {
                     continue;
                 }
                 let ground = cg.buf.get(lx, top, lz);
@@ -576,10 +576,10 @@ impl Writer<'_, '_> {
     }
 
     fn vine(&mut self, x: i32, y: i32, z: i32) {
-        if let Some((lx, lz)) = self.local(x, y, z) {
-            if self.cg.buf.get(lx, y, lz).is_air() {
-                self.put(lx, y, lz, blocks::VINE);
-            }
+        if let Some((lx, lz)) = self.local(x, y, z)
+            && self.cg.buf.get(lx, y, lz).is_air()
+        {
+            self.put(lx, y, lz, blocks::VINE);
         }
     }
 

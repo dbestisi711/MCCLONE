@@ -153,7 +153,7 @@ impl Args {
     }
     pub fn flag(&self, name: &str) -> bool {
         let key = format!("--{name}");
-        self.0.iter().any(|a| *a == key)
+        self.0.contains(&key)
     }
 }
 

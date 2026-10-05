@@ -102,11 +102,16 @@ impl TerrainNoise {
     pub fn terrain(&self, x: i32, y: i32, z: i32, shape: &Shape) -> f32 {
         let dist = shape.height - y as f32;
         let f = shape.factor;
-        let base = if dist > 0.0 {
+        let mut base = if dist > 0.0 {
             dist * f / 32.0
         } else {
             dist * f / 128.0
         };
+        // Top slide: nothing solid reaches the build limit.
+        const SLIDE: f32 = 270.0;
+        if y as f32 > SLIDE {
+            base -= (y as f32 - SLIDE) * 0.1;
+        }
         // Detail noise only matters close to the surface; far above or
         // below the sign is already decided (the noise is bounded by 1).
         let amp = self.noise_amp(f);

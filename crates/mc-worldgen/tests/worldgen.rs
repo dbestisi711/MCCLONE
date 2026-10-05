@@ -20,6 +20,12 @@ fn same_chunk(a: &Chunk, b: &Chunk) -> bool {
 }
 
 #[test]
+fn generator_is_send_and_sync() {
+    fn check<T: Send + Sync>() {}
+    check::<WorldGenerator>();
+}
+
+#[test]
 fn generation_is_deterministic() {
     let g1 = WorldGenerator::new(42);
     let g2 = WorldGenerator::new(42);
@@ -174,7 +180,7 @@ fn features_are_seamless_across_chunk_borders() {
                                 }
                             }
                         }
-                        if sides.iter().any(|s| *s == 0) {
+                        if sides.contains(&0) {
                             lopsided += 1;
                         }
                     }

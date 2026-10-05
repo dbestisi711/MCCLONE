@@ -7,19 +7,21 @@
 //! * deep cells (below y ≈ -24) hold lava up to y = -54;
 //! * other cells are dry, or flooded up to a local level chosen from noise.
 //!
-//! A voxel takes the level of the nearest cell centre. Where the nearest
-//! and the 2nd/3rd nearest centres disagree and the voxel lies within a
-//! thin band around their bisector (and below the higher of the two
-//! levels), it becomes a stone *barrier*. That keeps water from standing
-//! next to air at a different level, so no fluid hangs in mid-air. The
-//! result only depends on the voxel's world position, so it is identical
-//! on both sides of a chunk border.
+//! A voxel takes the level of the nearest cell centre. Where another
+//! centre that is almost as close would give this voxel a different fluid
+//! (water vs. air, water vs. lava…), the voxel becomes a stone *barrier*.
+//! That keeps water from standing next to air, so no fluid hangs in
+//! mid-air. The result only depends on the voxel's world position, so it
+//! is identical on both sides of a chunk border.
+//!
+//! (Open voxels above the terrain on land use the same rule; on oceans,
+//! rivers and lowland lakes they are plain sea-level water.)
 //!
 //! Cells are 32×16×32 blocks and distances count y twice, so in that metric
 //! the cells are cubes. Centres are jittered only within the middle of their
 //! cell ([10, 22) of 32), which guarantees that every centre within
 //! `nearest + BARRIER` of a voxel lies in the 3×3×3 cells around it. A voxel
-//! becomes a barrier if *any* centre in that band has a different level.
+//! becomes a barrier if *any* centre in that band would fill it differently.
 //! A one-block step changes the difference of two distances by at most 4
 //! (vertical) or 2 (horizontal), so with a band of 4.4 two neighbouring
 //! voxels can never end up with different fluids without a barrier between
@@ -88,6 +90,10 @@ pub struct ChunkAquifer {
     /// Per cell: highest fluid level among its 27 neighbours. Voxels above
     /// it are always dry and can skip the nearest-centre search.
     nb_max_top: Vec<i32>,
+    /// Per cell: lowest fluid level among its 27 neighbours, if they all
+    /// hold the same fluid kind (voxels below it are that fluid whatever
+    /// the nearest centre is). `i32::MIN` otherwise.
+    nb_min_top: Vec<i32>,
 }
 
 impl AquiferNoise {
@@ -174,23 +180,29 @@ impl AquiferNoise {
         let idx = |ix: usize, iy: usize, iz: usize| (iz * nx + ix) * ny + iy;
         let mut uniform = vec![false; cells.len()];
         let mut nb_max_top = vec![i32::MAX; cells.len()];
+        let mut nb_min_top = vec![i32::MIN; cells.len()];
         for iz in 1..nz - 1 {
             for ix in 1..nx - 1 {
                 for iy in 1..ny - 1 {
                     let c = cells[idx(ix, iy, iz)];
                     let mut same = true;
+                    let mut same_kind = true;
                     let mut max_top = i32::MIN;
+                    let mut min_top = i32::MAX;
                     for dz in 0..3 {
                         for dx in 0..3 {
                             for dy in 0..3 {
                                 let o = cells[idx(ix + dx - 1, iy + dy - 1, iz + dz - 1)];
                                 same &= c.same_level(&o);
+                                same_kind &= o.kind == c.kind;
                                 max_top = max_top.max(o.top);
+                                min_top = min_top.min(o.top);
                             }
                         }
                     }
                     uniform[idx(ix, iy, iz)] = same;
                     nb_max_top[idx(ix, iy, iz)] = max_top;
+                    nb_min_top[idx(ix, iy, iz)] = if same_kind { min_top } else { i32::MIN };
                 }
             }
         }
@@ -204,6 +216,7 @@ impl AquiferNoise {
             cells,
             uniform,
             nb_max_top,
+            nb_min_top,
         }
     }
 }
@@ -228,6 +241,10 @@ impl ChunkAquifer {
         if y > self.nb_max_top[own] {
             // Above every nearby fluid level: dry, and no barrier can apply.
             return Fluid::Air;
+        }
+        if y <= self.nb_min_top[own] {
+            // Below every nearby level of one single fluid.
+            return Self::fill(&self.cells[own], y);
         }
         // Distances to all 27 candidates (y counts twice).
         let mut d2s = [0f32; 27];
@@ -259,7 +276,7 @@ impl ChunkAquifer {
         for k in 0..27 {
             if k != best && d2s[k] < band2 {
                 let ck = &self.cells[idx[k]];
-                if !c1.same_level(ck) && y <= c1.top.max(ck.top) {
+                if Self::fill(c1, y) != Self::fill(ck, y) {
                     return Fluid::Barrier;
                 }
             }

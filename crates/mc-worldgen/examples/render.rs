@@ -142,19 +142,17 @@ fn cast(w: &World, o: [f32; 3], d: [f32; 3], max_t: f32, stop_at_water: bool) ->
                     });
                 }
             }
-            Hit::Water => {
-                if water_t.is_none() {
-                    water_t = Some(t);
-                    if stop_at_water {
-                        return Some(RayHit {
-                            id,
-                            pos: p,
-                            axis,
-                            sign: -step[axis],
-                            t,
-                            water_t,
-                        });
-                    }
+            Hit::Water if water_t.is_none() => {
+                water_t = Some(t);
+                if stop_at_water {
+                    return Some(RayHit {
+                        id,
+                        pos: p,
+                        axis,
+                        sign: -step[axis],
+                        t,
+                        water_t,
+                    });
                 }
             }
             _ => {}

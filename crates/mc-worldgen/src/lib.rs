@@ -696,7 +696,7 @@ impl<'a> ChunkGen<'a> {
             for lx in 0..16 {
                 let biome = self.biome(lx, lz);
                 let top = self.buf.top_below(lx, lz, self.max_y);
-                if top < WORLD_MIN_Y || top >= WORLD_MAX_Y - 1 {
+                if !(WORLD_MIN_Y..WORLD_MAX_Y - 1).contains(&top) {
                     continue;
                 }
                 if !is_cold_at(biome, top + 1) {
