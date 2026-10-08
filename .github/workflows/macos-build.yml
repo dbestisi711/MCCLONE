@@ -1,0 +1,22 @@
+# Builds MCCLONE.app (universal: Apple Silicon + Intel) and uploads it as a
+# workflow artifact. Runs when started by hand from the Actions tab.
+name: macOS build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and package
+        run: ./scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcclone-macos
+          path: dist/mcclone-macos.zip

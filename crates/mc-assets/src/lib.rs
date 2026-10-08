@@ -192,7 +192,7 @@ impl Pack {
     }
 
     /// Locate the pack: `$MC_PACK_DIR`, else a `pack.bin` bundle next to the
-    /// executable (packaged builds), else walk up from the current dir and
+    /// executable or in a macOS `.app`'s `Resources` (packaged builds), else walk up from the current dir and
     /// the executable's dir looking for `blocks.json` + `textures/`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn find() -> Option<Pack> {
@@ -203,14 +203,17 @@ impl Pack {
             .ok()
             .and_then(|e| e.parent().map(Path::to_path_buf))
         {
-            let bundle = dir.join("pack.bin");
-            if let Ok(bytes) = std::fs::read(&bundle) {
-                match Pack::from_bundle(&bytes) {
-                    Ok(mut pack) => {
-                        pack.root = bundle;
-                        return Some(pack);
+            // Next to the exe (Windows/Linux), or in a macOS app bundle's
+            // `Contents/Resources` (the exe lives in `Contents/MacOS`).
+            for bundle in [dir.join("pack.bin"), dir.join("../Resources/pack.bin")] {
+                if let Ok(bytes) = std::fs::read(&bundle) {
+                    match Pack::from_bundle(&bytes) {
+                        Ok(mut pack) => {
+                            pack.root = bundle;
+                            return Some(pack);
+                        }
+                        Err(e) => log::warn!("{}: {e}", bundle.display()),
                     }
-                    Err(e) => log::warn!("{}: {e}", bundle.display()),
                 }
             }
         }

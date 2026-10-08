@@ -36,6 +36,22 @@ Windows 10/11 and a GPU with DirectX 12 or Vulkan.
 - **On GitHub:** run the "Windows build" workflow from the Actions tab and
   download the `mcclone-windows` artifact.
 
+## macOS build
+
+- **Quickest, on a Mac:** install the Xcode command line tools
+  (`xcode-select --install`) and Rust (https://rustup.rs), then run
+  `cargo run --release` in the repo.
+- **A double-clickable app:** `./scripts/package-macos.sh` (on a Mac) builds
+  `dist/MCCLONE.app`, a universal app for Apple Silicon and Intel with the
+  pack files inside, plus `dist/mcclone-macos.zip`. Run
+  `rustup target add aarch64-apple-darwin x86_64-apple-darwin` once first.
+- **On GitHub:** run the "macOS build" workflow from the Actions tab and
+  download the `mcclone-macos` artifact.
+
+The app is not notarised, so the first launch is blocked by Gatekeeper:
+right-click (or Control-click) MCCLONE.app → Open → Open, or run
+`xattr -dr com.apple.quarantine MCCLONE.app`. Needs macOS 11 or newer.
+
 ## Web version (browser, iPad)
 
 The game also runs in the browser through WebAssembly and WebGPU (Chrome,
